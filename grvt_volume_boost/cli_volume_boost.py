@@ -10,7 +10,6 @@ import time
 from datetime import datetime
 from decimal import Decimal
 
-import requests
 from dotenv import load_dotenv
 
 from grvt_volume_boost.auth.cookies import get_cookies_parallel
@@ -49,18 +48,6 @@ def _alert(msg: str, *, critical: bool = False) -> None:
     _log(level, msg)
     if critical:
         print(f"\033[1;31m{'='*60}\n{level}: {msg}\n{'='*60}\033[0m")
-
-    bot_token = os.getenv("TELEGRAM_BOT_TOKEN")
-    chat_id = os.getenv("TELEGRAM_CHAT_ID")
-    if bot_token and chat_id:
-        try:
-            requests.post(
-                f"https://api.telegram.org/bot{bot_token}/sendMessage",
-                json={"chat_id": chat_id, "text": f"[{level}] {msg}"},
-                timeout=5,
-            )
-        except Exception:
-            pass
 
 
 def _shutdown_handler(signum, frame) -> None:
