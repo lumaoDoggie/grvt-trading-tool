@@ -88,6 +88,7 @@ def ensure_account_ids(state_path: Path, *, origin: str) -> tuple[str | None, st
     from playwright.sync_api import sync_playwright
     from playwright_stealth import Stealth
     from grvt_volume_boost.settings import EDGE_URL
+    from grvt_volume_boost.runtime import ensure_playwright_browsers_path
 
     # NOTE: The query string must contain real newlines. If it contains literal "\n"
     # sequences (backslash + n), the GraphQL parser will reject it.
@@ -107,6 +108,7 @@ def ensure_account_ids(state_path: Path, *, origin: str) -> tuple[str | None, st
 """
 
     try:
+        ensure_playwright_browsers_path()
         with sync_playwright() as p:
             stealth = Stealth()
             stealth.hook_playwright_context(p)
@@ -271,6 +273,7 @@ def fetch_subaccounts(state_path: Path, *, origin: str) -> list[dict]:
     from playwright.sync_api import sync_playwright
     from playwright_stealth import Stealth
     from grvt_volume_boost.settings import EDGE_URL
+    from grvt_volume_boost.runtime import ensure_playwright_browsers_path
 
     query = """query UserSubAccountsQuery {
   userSubAccounts {
@@ -288,6 +291,7 @@ def fetch_subaccounts(state_path: Path, *, origin: str) -> list[dict]:
 }
 """
 
+    ensure_playwright_browsers_path()
     with sync_playwright() as p:
         stealth = Stealth()
         stealth.hook_playwright_context(p)

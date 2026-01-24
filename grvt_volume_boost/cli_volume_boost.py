@@ -136,7 +136,7 @@ def main(argv: list[str] | None = None) -> None:
         return
     print("Cookies OK\n")
 
-    from grvt_volume_boost.clients.market_data import get_instrument
+    from grvt_volume_boost.clients.market_data import get_instrument, get_ticker
 
     inst_info = get_instrument(args.market)
     if args.notional_usd is not None:
