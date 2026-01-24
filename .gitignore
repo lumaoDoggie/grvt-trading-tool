@@ -1,0 +1,57 @@
+# Credentials
+.env
+*.env
+
+# Browser state & cookies
+session/
+session_testnet/
+grvt_browser_state*.json
+grvt_cookie_cache.json
+grvt_cookie_cache_testnet.json
+*_cache.json
+grvt_gui_prefs.json
+
+# QR captures / screenshots
+qr_capture_*.png
+qr_capture_*.meta.json
+grvt_volume_boost/image*.png
+image_*.png
+
+# Session keys
+session_key_info.txt
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+.pytest_cache/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Local AI tooling artifacts
+.claude/
+tmpclaude-*
+nul
+CLAUDE.md
+
+# Logs
+*.log
+runlogs*.jsonl
+grvt_volume_boost/log*
+
+# Local feedback/debug dumps
+feedback/
+
+# Playwright artifacts
+playwright-report/
+test-results/
+*.har
+trace*.zip
+*.webm
+*.mp4
