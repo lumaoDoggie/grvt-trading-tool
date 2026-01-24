@@ -17,6 +17,25 @@ from grvt_volume_boost.runtime import ensure_playwright_browsers_path
 from grvt_volume_boost.settings import EDGE_URL, ORIGIN, SESSION_DIR
 
 
+def _launch_chromium(p, *, headless: bool, args: list[str] | None = None, channel: str | None = None):
+    """Launch Chromium with an optional system channel, falling back to bundled Chromium.
+
+    - `channel="chrome"` uses the locally installed Chrome browser (often better vs automation checks).
+    - If that channel isn't available (common on fresh machines / packaged EXEs), fall back to
+      Playwright's bundled Chromium so the app still works one-click.
+    """
+    launch_kwargs: dict = {"headless": bool(headless)}
+    if args:
+        launch_kwargs["args"] = list(args)
+    if channel:
+        try:
+            return p.chromium.launch(channel=channel, **launch_kwargs)
+        except Exception:
+            # Fallback to bundled Chromium.
+            pass
+    return p.chromium.launch(**launch_kwargs)
+
+
 def decode_qr_image(image_path: str | Path) -> str | None:
     """Decode QR code from image file. Returns URL or None."""
     img = cv2.imread(str(image_path))
@@ -213,7 +232,8 @@ def _manual_verification_headed(
     with sync_playwright() as p:
         stealth = Stealth()
         stealth.hook_playwright_context(p)
-        browser = p.chromium.launch(
+        browser = _launch_chromium(
+            p,
             headless=False,
             args=["--disable-blink-features=AutomationControlled"],
             channel="chrome",
@@ -471,7 +491,7 @@ def qr_login_from_url(
                 args = ["--headless=new", *args]
             # Prefer a real Chrome channel to reduce automation friction (also in headless).
             launch_channel = channel if channel is not None else "chrome"
-            browser = p.chromium.launch(headless=headless, args=args, channel=launch_channel)
+            browser = _launch_chromium(p, headless=headless, args=args, channel=launch_channel)
             context = browser.new_context(
                 viewport={"width": 412, "height": 915},
                 device_scale_factor=2.625,
@@ -587,9 +607,9 @@ def qr_login(
         print("(Browser will be visible. Wait for login to complete...)")
 
     with sync_playwright() as p:
-        # Prefer a real Chrome channel to reduce automation friction (also in headless).
+        # Prefer a real Chrome channel if available, but fall back to bundled Chromium.
         launch_channel = channel if channel is not None else "chrome"
-        browser = p.chromium.launch(headless=headless, channel=launch_channel)
+        browser = _launch_chromium(p, headless=headless, channel=launch_channel)
         context = browser.new_context(viewport={"width": 1280, "height": 800})
         page = context.new_page()
 
