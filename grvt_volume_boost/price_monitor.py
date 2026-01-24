@@ -17,7 +17,16 @@ from typing import Callable
 
 import websockets
 
-from grvt_volume_boost.settings import WS_URL
+from urllib.parse import urlparse, urlunparse
+
+from grvt_volume_boost.settings import MARKET_DATA_URL
+
+
+def _market_data_ws_url() -> str:
+    """Convert MARKET_DATA_URL (http/https) to the matching ws/wss endpoint."""
+    parsed = urlparse(MARKET_DATA_URL)
+    scheme = "wss" if parsed.scheme == "https" else "ws"
+    return urlunparse((scheme, parsed.netloc, "/ws/full", "", "", ""))
 
 
 @dataclass
@@ -219,8 +228,9 @@ class TickerMonitor:
 
     async def _connect_and_listen(self) -> None:
         """Connect to WebSocket and process ticker updates."""
-        # Market data WebSocket endpoint (public, no auth needed)
-        ws_url = "wss://market-data.grvt.io/ws/full"
+        # Market data WebSocket endpoint (public, no auth needed).
+        # Use the env-selected MARKET_DATA_URL so TESTNET works correctly.
+        ws_url = _market_data_ws_url()
         
         async with websockets.connect(ws_url, close_timeout=2) as ws:
             # Subscribe to ticker stream
