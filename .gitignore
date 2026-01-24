@@ -43,7 +43,9 @@ CLAUDE.md
 # Logs
 *.log
 runlogs*.jsonl
-grvt_volume_boost/log*
+grvt_volume_boost/log*.log
+grvt_volume_boost/log*.txt
+grvt_volume_boost/log*.jsonl
 
 # Local feedback/debug dumps
 feedback/
