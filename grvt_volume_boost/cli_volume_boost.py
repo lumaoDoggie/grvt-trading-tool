@@ -30,6 +30,24 @@ from grvt_volume_boost.strategy import run_instant_round, run_normal_mode
 _shutdown_requested = False
 _active_accounts = []  # [(acc, cookie, instrument, inst_info), ...]
 _log_file: str | None = None
+_use_color = False
+
+
+def _auto_color_enabled() -> bool:
+    if os.getenv("NO_COLOR"):
+        return False
+    if not sys.stdout.isatty():
+        return False
+    if os.name != "nt":
+        return True
+    # Best-effort terminals that support ANSI by default.
+    return bool(os.getenv("WT_SESSION") or os.getenv("ANSICON") or os.getenv("ConEmuANSI") or os.getenv("TERM"))
+
+
+def _c(s: str, code: str) -> str:
+    if not _use_color:
+        return s
+    return f"\033[{code}m{s}\033[0m"
 
 
 def _log(level: str, msg: str) -> None:
@@ -47,7 +65,8 @@ def _alert(msg: str, *, critical: bool = False) -> None:
     level = "CRITICAL" if critical else "WARN"
     _log(level, msg)
     if critical:
-        print(f"\033[1;31m{'='*60}\n{level}: {msg}\n{'='*60}\033[0m")
+        banner = f"{'='*60}\n{level}: {msg}\n{'='*60}"
+        print(_c(banner, "1;31"))
 
 
 def _shutdown_handler(signum, frame) -> None:
@@ -56,11 +75,12 @@ def _shutdown_handler(signum, frame) -> None:
         print("\nForce quit!")
         sys.exit(1)
     _shutdown_requested = True
-    print("\n\033[1;33mShutdown requested - cleaning up...\033[0m")
+    print(_c("\nShutdown requested - cleaning up...", "1;33"))
 
 
 def main(argv: list[str] | None = None) -> None:
     global _active_accounts, _log_file
+    global _use_color
 
     load_dotenv(".env")
 
@@ -88,20 +108,28 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--hold", type=int, default=30, help="Hold time in minutes (normal mode)")
     parser.add_argument("--confirm", action="store_true", help="Confirm production trading")
     parser.add_argument("--log", type=str, help="JSONL log file path")
+    parser.add_argument("--color", action="store_true", help="Force-enable ANSI colors")
+    parser.add_argument("--no-color", action="store_true", help="Disable ANSI colors")
     args = parser.parse_args(argv)
 
-    print("\033[1;31m" + "=" * 60)
+    _use_color = _auto_color_enabled()
+    if args.no_color:
+        _use_color = False
+    if args.color:
+        _use_color = True
+
+    print(_c("=" * 60, "1;31"))
     print("  ██████╗ ██████╗  ██████╗ ██████╗ ██╗   ██╗ ██████╗████████╗██╗ ██████╗ ███╗   ██╗")
     print("  ██╔══██╗██╔══██╗██╔═══██╗██╔══██╗██║   ██║██╔════╝╚══██╔══╝██║██╔═══██╗████╗  ██║")
     print("  ██████╔╝██████╔╝██║   ██║██║  ██║██║   ██║██║        ██║   ██║██║   ██║██╔██╗ ██║")
     print("  ██╔═══╝ ██╔══██╗██║   ██║██║  ██║██║   ██║██║        ██║   ██║██║   ██║██║╚██╗██║")
     print("  ██║     ██║  ██║╚██████╔╝██████╔╝╚██████╔╝╚██████╗   ██║   ██║╚██████╔╝██║ ╚████║")
     print("  ╚═╝     ╚═╝  ╚═╝ ╚═════╝ ╚═════╝  ╚═════╝  ╚═════╝   ╚═╝   ╚═╝ ╚═════╝ ╚═╝  ╚═══╝")
-    print("=" * 60 + "\033[0m")
+    print(_c("=" * 60, "0"))
     print(f"Chain ID: {CHAIN_ID} | Trades: {TRADES_URL}")
 
     if not args.confirm:
-        print("\n\033[1;33mThis will execute REAL trades on PRODUCTION.\033[0m")
+        print(_c("\nThis will execute REAL trades on PRODUCTION.", "1;33"))
         print("Add --confirm flag to proceed, or run 'python volume_boost.py doctor' first.")
         return
 

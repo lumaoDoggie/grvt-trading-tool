@@ -5,17 +5,22 @@ import json
 import random
 import time
 from dataclasses import dataclass
-from decimal import Decimal, ROUND_DOWN
+from decimal import Decimal
 from typing import Any, Callable
 
 import websockets
 
 from grvt_volume_boost.clients.market_data import get_instrument, get_ticker
 from grvt_volume_boost.clients.trades import post as trades_post
-from grvt_volume_boost.services.orders import cancel_all_orders, cancel_order, get_position_size
-from grvt_volume_boost.services.signing import sign_order
+from grvt_volume_boost.services.orders import (
+    build_create_order_payload,
+    cancel_all_orders,
+    cancel_order,
+    get_position_size,
+)
 from grvt_volume_boost.sizing import mid_price_from_ticker, normalize_size
 from grvt_volume_boost.settings import WS_URL
+from grvt_volume_boost.util import deep_contains
 
 
 def _decimal_field(inst_info: dict, key: str, default: str = "0") -> Decimal:
@@ -25,31 +30,9 @@ def _decimal_field(inst_info: dict, key: str, default: str = "0") -> Decimal:
     return Decimal(str(raw))
 
 
-def _round_to_tick(price: Decimal, tick: Decimal) -> Decimal:
-    if tick <= 0:
-        return price
-    steps = (price / tick).to_integral_value(rounding=ROUND_DOWN)
-    return (steps * tick).quantize(tick, rounding=ROUND_DOWN)
-
-
 def _deep_contains(obj: Any, needle: str) -> bool:
-    """Best-effort recursive search for `needle` in dict/list/strings."""
-    if obj is None:
-        return False
-    if isinstance(obj, str):
-        return needle in obj
-    if isinstance(obj, (int, float, bool)):
-        return False
-    if isinstance(obj, dict):
-        for k, v in obj.items():
-            if isinstance(k, str) and needle in k:
-                return True
-            if _deep_contains(v, needle):
-                return True
-        return False
-    if isinstance(obj, list):
-        return any(_deep_contains(v, needle) for v in obj)
-    return False
+    # Back-compat alias for older call sites.
+    return deep_contains(obj, needle)
 
 
 def _extract_oid(order_data: dict) -> str | None:
@@ -85,59 +68,39 @@ def _build_order_payload(
     price: Decimal | None,
     post_only: bool,
 ) -> dict:
-    base_decimals = int(inst_info["base_decimals"])
-    inst_hash = inst_info["instrument_hash"]
-    asset_id = int(inst_hash, 16) if str(inst_hash).startswith("0x") else int(inst_hash)
-
-    contract_size = int((size * (Decimal(10) ** base_decimals)).to_integral_value(rounding=ROUND_DOWN))
-    limit_price = 0
-    if not is_market:
-        if price is None:
-            raise ValueError("price is required for limit orders")
-        limit_price = int((price * (Decimal(10) ** 9)).to_integral_value(rounding=ROUND_DOWN))  # 9 decimals
-
-    expiration_ns = int((time.time() + 30 * 24 * 60 * 60) * 1000) * 1_000_000
-
-    message_data = {
-        "subAccountID": int(acc.sub_account_id),
-        "isMarket": bool(is_market),
-        "timeInForce": 1,  # GOOD_TILL_TIME
-        "postOnly": bool(post_only),
-        "reduceOnly": bool(reduce_only),
-        "legs": [
-            {
-                "assetID": asset_id,
-                "contractSize": contract_size,
-                "limitPrice": limit_price,
-                "isBuyingContract": bool(is_buying),
-            }
-        ],
-        "nonce": int(nonce),
-        "expiration": int(expiration_ns),
-    }
-
-    _, sig = sign_order(acc, message_data)
-
-    return {
-        "o": {
-            "sa": acc.sub_account_id,
-            "im": bool(is_market),
-            "ti": "GOOD_TILL_TIME",
-            "po": bool(post_only),
-            "ro": bool(reduce_only),
-            "l": [
-                {
-                    "i": instrument,
-                    "s": str(size),
-                    "lp": "0.0" if is_market else str(price),
-                    "ib": bool(is_buying),
-                }
-            ],
-            "s": sig,
-            # Match existing clients: "co" holds the same nonce.
-            "m": {"s": "WEB", "co": str(nonce)},
-        }
-    }
+    # Back-compat shim: this module previously had its own payload builder.
+    if is_market:
+        # `price` is ignored for market orders.
+        return build_create_order_payload(
+            acc=acc,
+            instrument=instrument,
+            size=size,
+            inst_info=inst_info,
+            is_buying=is_buying,
+            is_market=True,
+            time_in_force="GOOD_TILL_TIME",
+            tif_code=1,
+            price=Decimal("0"),
+            reduce_only=reduce_only,
+            post_only=post_only,
+            nonce=nonce,
+        )
+    if price is None:
+        raise ValueError("price is required for limit orders")
+    return build_create_order_payload(
+        acc=acc,
+        instrument=instrument,
+        size=size,
+        inst_info=inst_info,
+        is_buying=is_buying,
+        is_market=False,
+        time_in_force="GOOD_TILL_TIME",
+        tif_code=1,
+        price=price,
+        reduce_only=reduce_only,
+        post_only=post_only,
+        nonce=nonce,
+    )
 
 
 async def ws_connect_and_subscribe(

@@ -6,6 +6,7 @@ from decimal import Decimal, ROUND_DOWN
 
 from grvt_volume_boost.clients.trades import post
 from grvt_volume_boost.config import AccountConfig
+from grvt_volume_boost.logging_utils import debug
 from grvt_volume_boost.services.signing import sign_order
 
 
@@ -17,7 +18,8 @@ def ping_auth(acc: AccountConfig, cookie: str) -> bool:
             return False
         data = r.json()
         return isinstance(data, dict) and ("r" in data or "result" in data)
-    except Exception:
+    except Exception as e:
+        debug("ping_auth failed", exc=e)
         return False
 
 
@@ -37,7 +39,8 @@ def get_margin_ratio(acc: AccountConfig, cookie: str) -> float | None:
         equity = Decimal(data["result"].get("total_equity") or data["result"].get("equity") or "0")
         margin = Decimal(data["result"].get("maintenance_margin") or "0")
         return float(margin / equity) if equity > 0 else 0.0
-    except Exception:
+    except Exception as e:
+        debug("get_margin_ratio failed", exc=e)
         return None
 
 
@@ -58,7 +61,8 @@ def get_position_size(acc: AccountConfig, cookie: str, instrument: str) -> Decim
             if p.get("instrument") == instrument:
                 return Decimal(p.get("size", "0"))
         return Decimal(0)
-    except Exception:
+    except Exception as e:
+        debug("get_position_size failed", exc=e, extra={"instrument": instrument})
         return None
 
 
@@ -73,7 +77,8 @@ def cancel_order(acc: AccountConfig, cookie: str, order_id: str) -> bool:
             timeout=30,
         )
         return r.status_code == 200 and "result" in r.json()
-    except Exception:
+    except Exception as e:
+        debug("cancel_order failed", exc=e)
         return False
 
 
@@ -88,7 +93,8 @@ def cancel_all_orders(acc: AccountConfig, cookie: str) -> bool:
             timeout=30,
         )
         return r.status_code == 200
-    except Exception:
+    except Exception as e:
+        debug("cancel_all_orders failed", exc=e)
         return False
 
 
@@ -103,7 +109,8 @@ def get_open_orders(acc: AccountConfig, cookie: str, instrument: str | None = No
         if "result" in data:
             return data["result"]
         return []
-    except Exception:
+    except Exception as e:
+        debug("get_open_orders failed", exc=e, extra={"instrument": instrument or ""})
         return None
 
 
@@ -130,7 +137,8 @@ def get_all_initial_leverage(acc: AccountConfig, cookie: str) -> list[dict] | No
         if isinstance(res2, list):
             return res2
         return []
-    except Exception:
+    except Exception as e:
+        debug("get_all_initial_leverage failed", exc=e)
         return None
 
 
@@ -151,11 +159,12 @@ def set_initial_leverage(acc: AccountConfig, cookie: str, *, instrument: str, le
         if data.get("s") is True:
             return True
         return "r" in data or "result" in data
-    except Exception:
+    except Exception as e:
+        debug("set_initial_leverage failed", exc=e, extra={"instrument": instrument, "leverage": leverage})
         return False
 
 
-def _build_order_payload(
+def build_create_order_payload(
     *,
     acc: AccountConfig,
     instrument: str,
@@ -168,6 +177,8 @@ def _build_order_payload(
     price: Decimal,
     reduce_only: bool,
     post_only: bool = False,
+    nonce: int | None = None,
+    expiration_ns: int | None = None,
 ) -> dict:
     base_decimals = int(inst_info["base_decimals"])
     inst_hash = inst_info["instrument_hash"]
@@ -179,11 +190,14 @@ def _build_order_payload(
     if not is_market:
         limit_price = int((price * (Decimal(10) ** 9)).to_integral_value(rounding=ROUND_DOWN))  # 9 decimals
 
-    nonce = random.randint(0, 2**32 - 1)
-    if is_market:
-        expiration_ns = int(time.time_ns() + 30 * 24 * 60 * 60 * 1_000_000_000)
-    else:
-        expiration_ns = int((time.time() + 30 * 24 * 60 * 60) * 1000) * 1000000
+    if nonce is None:
+        nonce = random.randint(0, 2**32 - 1)
+    if expiration_ns is None:
+        # Keep the existing behavior: market uses ns precision; limit uses ms precision.
+        if is_market:
+            expiration_ns = int(time.time_ns() + 30 * 24 * 60 * 60 * 1_000_000_000)
+        else:
+            expiration_ns = int((time.time() + 30 * 24 * 60 * 60) * 1000) * 1_000_000
 
     message_data = {
         "subAccountID": int(acc.sub_account_id),
@@ -219,13 +233,44 @@ def _build_order_payload(
     }
 
 
+def _build_order_payload(
+    *,
+    acc: AccountConfig,
+    instrument: str,
+    size: Decimal,
+    inst_info: dict,
+    is_buying: bool,
+    is_market: bool,
+    time_in_force: str,
+    tif_code: int,
+    price: Decimal,
+    reduce_only: bool,
+    post_only: bool = False,
+) -> dict:
+    # Back-compat shim: older code calls the private builder.
+    return build_create_order_payload(
+        acc=acc,
+        instrument=instrument,
+        size=size,
+        inst_info=inst_info,
+        is_buying=is_buying,
+        is_market=is_market,
+        time_in_force=time_in_force,
+        tif_code=tif_code,
+        price=price,
+        reduce_only=reduce_only,
+        post_only=post_only,
+    )
+
+
 def _create_order(acc: AccountConfig, cookie: str, payload: dict) -> dict | None:
     for _ in range(3):
         try:
             r = post("/lite/v1/create_order", acc=acc, cookie=cookie, payload=payload, timeout=30)
             if r.status_code != 503:
                 return r.json()
-        except Exception:
+        except Exception as e:
+            debug("_create_order failed", exc=e)
             pass
         time.sleep(1)
     return None

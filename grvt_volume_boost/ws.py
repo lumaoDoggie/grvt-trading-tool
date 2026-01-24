@@ -10,26 +10,12 @@ from typing import Callable
 import websockets
 
 from grvt_volume_boost.settings import WS_URL
+from grvt_volume_boost.util import deep_contains
 
 
 def _deep_contains(obj, needle: str) -> bool:
-    """Best-effort recursive search for `needle` in dict/list/str payloads."""
-    if obj is None:
-        return False
-    if isinstance(obj, str):
-        return needle in obj
-    if isinstance(obj, (int, float, bool)):
-        return False
-    if isinstance(obj, dict):
-        for k, v in obj.items():
-            if isinstance(k, str) and needle in k:
-                return True
-            if _deep_contains(v, needle):
-                return True
-        return False
-    if isinstance(obj, list):
-        return any(_deep_contains(v, needle) for v in obj)
-    return False
+    # Back-compat alias for older call sites.
+    return deep_contains(obj, needle)
 
 
 def _extract_status_any(feed: dict, order_data: dict | None = None) -> str | None:
