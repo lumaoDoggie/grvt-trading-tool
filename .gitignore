@@ -57,8 +57,10 @@ test-results/
 trace*.zip
 *.webm
 *.mp4
+playwright-browsers/
 
 # PyInstaller / packaging
 build/
 dist/
 *.spec
+GRVTVolumeBoost-windows-x64.zip

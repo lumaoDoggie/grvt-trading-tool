@@ -1,11 +1,13 @@
-$ErrorActionPreference = "Stop"
-
 param(
   [string]$Name = "GRVTVolumeBoost",
   [string]$Entry = "volume_boost_gui.py",
   [string]$OutDir = "dist",
   [string]$BrowserDir = "playwright-browsers"
 )
+
+# Must come after the param() block; otherwise PowerShell can treat param as a normal command,
+# causing a parse error in GitHub Actions.
+$ErrorActionPreference = "Stop"
 
 Write-Host "== Building Windows package ($Name) =="
 
