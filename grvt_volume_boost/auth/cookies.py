@@ -6,6 +6,7 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from pathlib import Path
 
+from grvt_volume_boost.runtime import ensure_playwright_browsers_path
 from grvt_volume_boost.settings import COOKIE_CACHE_FILE, ORIGIN
 from grvt_volume_boost.i18n import tr
 
@@ -162,6 +163,7 @@ def get_fresh_cookie(state_path: Path, *, origin: str = ORIGIN, force_refresh: b
         from playwright.sync_api import sync_playwright
         from playwright_stealth import Stealth
 
+        ensure_playwright_browsers_path()
         with sync_playwright() as p:
             stealth = Stealth()
             stealth.hook_playwright_context(p)

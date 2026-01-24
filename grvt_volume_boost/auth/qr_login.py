@@ -13,6 +13,7 @@ import cv2
 import numpy as np
 
 from grvt_volume_boost.auth.cookies import save_cookie_cache
+from grvt_volume_boost.runtime import ensure_playwright_browsers_path
 from grvt_volume_boost.settings import EDGE_URL, ORIGIN, SESSION_DIR
 
 
@@ -208,6 +209,7 @@ def _manual_verification_headed(
     from playwright.sync_api import sync_playwright
     from playwright_stealth import Stealth
 
+    ensure_playwright_browsers_path()
     with sync_playwright() as p:
         stealth = Stealth()
         stealth.hook_playwright_context(p)
@@ -460,6 +462,7 @@ def qr_login_from_url(
     SESSION_DIR.mkdir(exist_ok=True)
 
     try:
+        ensure_playwright_browsers_path()
         with sync_playwright() as p:
             stealth = Stealth()
             stealth.hook_playwright_context(p)
@@ -564,6 +567,7 @@ def qr_login(
     import time
     from playwright.sync_api import sync_playwright
 
+    ensure_playwright_browsers_path()
     # Decode QR
     url = decode_qr_image(image_path)
     if not url:

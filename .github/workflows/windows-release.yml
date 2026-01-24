@@ -1,0 +1,41 @@
+name: windows-release
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Build EXE (PyInstaller)
+        shell: pwsh
+        run: |
+          ./scripts/build_windows.ps1 -Name GRVTVolumeBoost -Entry volume_boost_gui.py -OutDir dist -BrowserDir playwright-browsers
+
+      - name: Zip artifact
+        shell: pwsh
+        run: |
+          $name = "GRVTVolumeBoost-windows-x64"
+          if (Test-Path "$name.zip") { Remove-Item -Force "$name.zip" }
+          Compress-Archive -Path "dist/GRVTVolumeBoost" -DestinationPath "$name.zip"
+          Get-Item "$name.zip" | Format-List Name,Length,LastWriteTime
+
+      - name: Release (tag builds)
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            GRVTVolumeBoost-windows-x64.zip
+

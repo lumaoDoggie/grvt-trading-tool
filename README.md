@@ -25,6 +25,14 @@ python -m playwright install
 python volume_boost_gui.py
 ```
 
+## Windows EXE (one-click)
+
+For Windows users, download the latest `GRVTVolumeBoost-windows-x64.zip` from GitHub Releases, unzip it, then run:
+
+- `GRVTVolumeBoost.exe`
+
+The release build bundles Playwright Chromium, so QR login / cookie refresh works without extra setup.
+
 ### 3) Configure accounts (QR)
 
 - Click `Setup Account`

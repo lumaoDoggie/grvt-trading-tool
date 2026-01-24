@@ -55,3 +55,8 @@ test-results/
 trace*.zip
 *.webm
 *.mp4
+
+# PyInstaller / packaging
+build/
+dist/
+*.spec
