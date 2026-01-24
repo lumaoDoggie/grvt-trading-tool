@@ -33,6 +33,10 @@ For Windows users, download the latest `GRVTVolumeBoost-windows-x64.zip` from Gi
 
 The release build bundles Playwright Chromium, so QR login / cookie refresh works without extra setup.
 
+## 中文说明
+
+See `README_zh.md`.
+
 ### 3) Configure accounts (QR)
 
 - Click `Setup Account`
