@@ -10,11 +10,10 @@ param(
 Write-Host "== Building Windows package ($Name) =="
 
 # Ensure Playwright browsers are installed into a local folder we can ship alongside the EXE.
-$env:PLAYWRIGHT_BROWSERS_PATH = (Resolve-Path $BrowserDir).Path 2>$null
-if (-not $env:PLAYWRIGHT_BROWSERS_PATH) {
+if (-not (Test-Path $BrowserDir)) {
   New-Item -ItemType Directory -Force -Path $BrowserDir | Out-Null
-  $env:PLAYWRIGHT_BROWSERS_PATH = (Resolve-Path $BrowserDir).Path
 }
+$env:PLAYWRIGHT_BROWSERS_PATH = (Resolve-Path $BrowserDir).Path
 
 python -m pip install --upgrade pip
 python -m pip install -r requirements.txt pyinstaller
@@ -44,4 +43,3 @@ if (-not (Test-Path $target)) {
 Copy-Item -Recurse -Force $BrowserDir (Join-Path $target $BrowserDir)
 
 Write-Host "Build complete: $target"
-
