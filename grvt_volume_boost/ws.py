@@ -11,6 +11,7 @@ import websockets
 
 from grvt_volume_boost.settings import WS_URL
 from grvt_volume_boost.util import deep_contains
+from grvt_volume_boost.ws_compat import connect as ws_connect
 
 
 def _deep_contains(obj, needle: str) -> bool:
@@ -306,9 +307,9 @@ class OrderStreamClient:
                 if self.instrument:
                     selectors.append(f"{self.sub_account_id}-{self.instrument}")
 
-                ws = await websockets.connect(
+                ws = await ws_connect(
                     WS_URL,
-                    extra_headers={
+                    headers={
                         "Cookie": f"gravity={cookie}",
                         "X-Grvt-Account-Id": self.main_account_id,
                     },
@@ -426,11 +427,7 @@ async def wait_for_order_on_book(
         if instrument:
             selector = f"{sub_account_id}-{instrument}"
 
-        async with websockets.connect(
-            WS_URL,
-            extra_headers=headers,
-            close_timeout=2,
-        ) as ws:
+        async with ws_connect(WS_URL, headers=headers, close_timeout=2) as ws:
             subscribe_msg = {
                 "jsonrpc": "2.0",
                 "method": "subscribe",
@@ -491,11 +488,7 @@ async def wait_for_order_on_book_by_client_co(
             # Some environments only deliver instrument-scoped order feeds. Subscribe to both.
             selectors.append(f"{sub_account_id}-{instrument}")
 
-        async with websockets.connect(
-            WS_URL,
-            extra_headers=headers,
-            close_timeout=2,
-        ) as ws:
+        async with ws_connect(WS_URL, headers=headers, close_timeout=2) as ws:
             subscribe_msg = {
                 "jsonrpc": "2.0",
                 "method": "subscribe",

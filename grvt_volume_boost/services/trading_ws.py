@@ -21,6 +21,7 @@ from grvt_volume_boost.services.orders import (
 from grvt_volume_boost.sizing import mid_price_from_ticker, normalize_size
 from grvt_volume_boost.settings import WS_URL
 from grvt_volume_boost.util import deep_contains
+from grvt_volume_boost.ws_compat import connect as ws_connect
 
 
 def _decimal_field(inst_info: dict, key: str, default: str = "0") -> Decimal:
@@ -112,9 +113,9 @@ async def ws_connect_and_subscribe(
     request_id: int = 1,
 ):
     """Open an authenticated WS connection and send a JSON-RPC subscribe."""
-    ws = await websockets.connect(
+    ws = await ws_connect(
         WS_URL,
-        extra_headers={
+        headers={
             "Cookie": f"gravity={cookie}",
             # Required per GRVT trading streams docs for account-specific feeds.
             "X-Grvt-Account-Id": str(main_account_id),

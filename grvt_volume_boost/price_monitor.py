@@ -20,6 +20,7 @@ import websockets
 from urllib.parse import urlparse, urlunparse
 
 from grvt_volume_boost.settings import MARKET_DATA_URL
+from grvt_volume_boost.ws_compat import connect as ws_connect
 
 
 def _market_data_ws_url() -> str:
@@ -232,7 +233,7 @@ class TickerMonitor:
         # Use the env-selected MARKET_DATA_URL so TESTNET works correctly.
         ws_url = _market_data_ws_url()
         
-        async with websockets.connect(ws_url, close_timeout=2) as ws:
+        async with ws_connect(ws_url, close_timeout=2) as ws:
             # Subscribe to ticker stream
             subscribe_msg = {
                 "jsonrpc": "2.0",

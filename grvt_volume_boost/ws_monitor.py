@@ -13,6 +13,7 @@ import websockets
 
 from grvt_volume_boost.services.orders import get_open_orders
 from grvt_volume_boost.settings import WS_URL
+from grvt_volume_boost.ws_compat import connect as ws_connect
 
 if TYPE_CHECKING:
     from grvt_volume_boost.config import AccountConfig
@@ -106,9 +107,9 @@ class PositionWSManager:
                     continue
 
                 # Subscribe to order updates for all instruments
-                ws = await websockets.connect(
+                ws = await ws_connect(
                     WS_URL,
-                    extra_headers={
+                    headers={
                         "Cookie": f"gravity={cookie}",
                         "X-Grvt-Account-Id": str(acc.main_account_id),
                     },

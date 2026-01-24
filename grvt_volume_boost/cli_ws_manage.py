@@ -20,6 +20,7 @@ from grvt_volume_boost.services.orders import cancel_all_orders, cancel_order, g
 from grvt_volume_boost.services.signing import sign_order
 from grvt_volume_boost.sizing import mid_price_from_ticker, normalize_size
 from grvt_volume_boost.settings import WS_URL
+from grvt_volume_boost.ws_compat import connect as ws_connect
 
 
 def _decimal_field(inst_info: dict, key: str, default: str = "0") -> Decimal:
@@ -144,9 +145,9 @@ def _build_order_payload(
 
 
 async def _ws_connect_and_subscribe(cookie: str, *, main_account_id: str, stream: str, selectors: list[str]):
-    ws = await websockets.connect(
+    ws = await ws_connect(
         WS_URL,
-        extra_headers={
+        headers={
             "Cookie": f"gravity={cookie}",
             # Required per GRVT trading streams docs.
             "X-Grvt-Account-Id": str(main_account_id),
