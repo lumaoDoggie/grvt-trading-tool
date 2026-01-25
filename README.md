@@ -107,4 +107,5 @@ GUI 顶部可以切换：
 
 - 作者：撸毛小狗
 - 推特：<https://x.com/LumaoDoggie>
-- GRVT 高返佣注册链接：<https://grvt.io/?ref=lumaoDoggie>
+- GRVT 高返佣注册链接：<https://grvt.io/?ref=lumaoDoggie>  , 全网最高的 35%返佣 + 1.3倍积分加成
+- Telegram 交流群: <https://t.me/+Oe-Ul8Pzyck4ZGQ1>  (返佣在群里领,每个月底发放)
