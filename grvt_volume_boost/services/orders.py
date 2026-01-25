@@ -8,6 +8,7 @@ from grvt_volume_boost.clients.trades import post
 from grvt_volume_boost.config import AccountConfig
 from grvt_volume_boost.logging_utils import debug
 from grvt_volume_boost.services.signing import sign_order
+from grvt_volume_boost.settings import SIGNATURE_EXPIRATION_SEC
 
 
 def ping_auth(acc: AccountConfig, cookie: str) -> bool:
@@ -193,11 +194,9 @@ def build_create_order_payload(
     if nonce is None:
         nonce = random.randint(0, 2**32 - 1)
     if expiration_ns is None:
-        # Keep the existing behavior: market uses ns precision; limit uses ms precision.
-        if is_market:
-            expiration_ns = int(time.time_ns() + 30 * 24 * 60 * 60 * 1_000_000_000)
-        else:
-            expiration_ns = int((time.time() + 30 * 24 * 60 * 60) * 1000) * 1_000_000
+        # Docs: unix nanoseconds, capped at 30 days.
+        # Use a conservative default and allow overrides via GRVT_SIGNATURE_EXPIRATION_SEC.
+        expiration_ns = int(time.time_ns() + SIGNATURE_EXPIRATION_SEC * 1_000_000_000)
 
     message_data = {
         "subAccountID": int(acc.sub_account_id),

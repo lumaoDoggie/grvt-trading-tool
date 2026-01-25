@@ -19,7 +19,7 @@ from grvt_volume_boost.config import get_account
 from grvt_volume_boost.services.orders import cancel_all_orders, cancel_order, get_position_size
 from grvt_volume_boost.services.signing import sign_order
 from grvt_volume_boost.sizing import mid_price_from_ticker, normalize_size
-from grvt_volume_boost.settings import WS_URL
+from grvt_volume_boost.settings import SIGNATURE_EXPIRATION_SEC, WS_URL
 from grvt_volume_boost.ws_compat import connect as ws_connect
 
 
@@ -100,7 +100,8 @@ def _build_order_payload(
             raise ValueError("price is required for limit orders")
         limit_price = int((price * (Decimal(10) ** 9)).to_integral_value(rounding=ROUND_DOWN))  # 9 decimals
 
-    expiration_ns = int((time.time() + 30 * 24 * 60 * 60) * 1000) * 1_000_000
+    # Docs: unix nanoseconds, capped at 30 days. Use a conservative default.
+    expiration_ns = int(time.time_ns() + SIGNATURE_EXPIRATION_SEC * 1_000_000_000)
 
     message_data = {
         "subAccountID": int(acc.sub_account_id),

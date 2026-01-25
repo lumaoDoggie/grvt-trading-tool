@@ -70,3 +70,9 @@ EDGE_URL = _env_url(
 
 SESSION_DIR = REPO_ROOT / ("session_testnet" if ENV == "testnet" else "session")
 COOKIE_CACHE_FILE = REPO_ROOT / ("grvt_cookie_cache_testnet.json" if ENV == "testnet" else "grvt_cookie_cache.json")
+
+# Signature expiration for EIP-712 order signing.
+# Docs: unix nanoseconds, capped at 30 days. Keep this conservative by default because
+# the tool cancels/IOCs quickly and some environments may enforce stricter caps.
+_MAX_SIG_EXP_SEC = 30 * 24 * 60 * 60
+SIGNATURE_EXPIRATION_SEC = min(_env_int("GRVT_SIGNATURE_EXPIRATION_SEC", 6 * 60 * 60), _MAX_SIG_EXP_SEC - 60)
