@@ -2,6 +2,8 @@
 
 本项目提供 GUI 和命令行（CLI）两种方式，使用两个 GRVT 账号在永续合约市场进行对冲交易（对敲）以产生交易量。登录方式为扫码（QR）登录并保存本地会话（不需要 API Key）。
 
+Youtube教学视频: <https://www.youtube.com/watch?v=FfrjZStzyAo>
+
 English README: `README_en.md`.
 
 ## 风险提示
