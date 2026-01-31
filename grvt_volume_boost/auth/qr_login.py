@@ -13,6 +13,7 @@ import cv2
 import numpy as np
 
 from grvt_volume_boost.auth.cookies import save_cookie_cache
+from grvt_volume_boost.playwright_compat import run_sync_playwright
 from grvt_volume_boost.runtime import ensure_playwright_browsers_path
 from grvt_volume_boost.settings import EDGE_URL, ORIGIN, SESSION_DIR
 
@@ -225,31 +226,34 @@ def _manual_verification_headed(
     timeout_sec: float,
 ) -> str | None:
     """Open a headed browser with the current state to allow manual verification."""
-    from playwright.sync_api import sync_playwright
-    from playwright_stealth import Stealth
+    def _run() -> str | None:
+        from playwright.sync_api import sync_playwright
+        from playwright_stealth import Stealth
 
-    ensure_playwright_browsers_path()
-    with sync_playwright() as p:
-        stealth = Stealth()
-        stealth.hook_playwright_context(p)
-        browser = _launch_chromium(
-            p,
-            headless=False,
-            args=["--disable-blink-features=AutomationControlled"],
-            channel="chrome",
-        )
-        context = browser.new_context(storage_state=str(state_path), viewport={"width": 1280, "height": 720}, locale="en-US")
-        page = context.new_page()
-        # Going to the exchange page tends to surface verification UI if needed.
-        try:
-            page.goto(f"{origin}/exchange/perpetual/BTC-USDT", wait_until="domcontentloaded", timeout=60000)
-        except Exception:
-            page.goto(origin, wait_until="domcontentloaded", timeout=60000)
+        ensure_playwright_browsers_path()
+        with sync_playwright() as p:
+            stealth = Stealth()
+            stealth.hook_playwright_context(p)
+            browser = _launch_chromium(
+                p,
+                headless=False,
+                args=["--disable-blink-features=AutomationControlled"],
+                channel="chrome",
+            )
+            context = browser.new_context(storage_state=str(state_path), viewport={"width": 1280, "height": 720}, locale="en-US")
+            page = context.new_page()
+            # Going to the exchange page tends to surface verification UI if needed.
+            try:
+                page.goto(f"{origin}/exchange/perpetual/BTC-USDT", wait_until="domcontentloaded", timeout=60000)
+            except Exception:
+                page.goto(origin, wait_until="domcontentloaded", timeout=60000)
 
-        sk, _ = _wait_for_session_key(page, timeout_sec=timeout_sec, get_email_code=None, on_event=None)
-        context.storage_state(path=str(state_path))
-        browser.close()
-        return sk
+            sk, _ = _wait_for_session_key(page, timeout_sec=timeout_sec, get_email_code=None, on_event=None)
+            context.storage_state(path=str(state_path))
+            browser.close()
+            return sk
+
+    return run_sync_playwright(_run)
 
 
 def _wait_for_local_storage_key(page, key: str, *, timeout_sec: float) -> str | None:
@@ -472,104 +476,107 @@ def qr_login_from_url(
     the email verification step. When `require_session_key` is True, this will wait until that
     key exists before saving storage state.
     """
-    from playwright.sync_api import sync_playwright
-    from playwright_stealth import Stealth
+    def _run() -> tuple[str | None, str]:
+        from playwright.sync_api import sync_playwright
+        from playwright_stealth import Stealth
 
-    payload = parse_qr_url(url)
-    if not payload:
-        return None, "Invalid QR code URL format"
+        payload = parse_qr_url(url)
+        if not payload:
+            return None, "Invalid QR code URL format"
 
-    SESSION_DIR.mkdir(exist_ok=True)
+        SESSION_DIR.mkdir(exist_ok=True)
 
-    try:
-        ensure_playwright_browsers_path()
-        with sync_playwright() as p:
-            stealth = Stealth()
-            stealth.hook_playwright_context(p)
-            args = ["--disable-blink-features=AutomationControlled"]
-            if headless:
-                args = ["--headless=new", *args]
-            # Prefer a real Chrome channel to reduce automation friction (also in headless).
-            launch_channel = channel if channel is not None else "chrome"
-            browser = _launch_chromium(p, headless=headless, args=args, channel=launch_channel)
-            context = browser.new_context(
-                viewport={"width": 412, "height": 915},
-                device_scale_factor=2.625,
-                is_mobile=True,
-                has_touch=True,
-                user_agent="Mozilla/5.0 (Linux; Android 14; Pixel 8 Pro) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Mobile Safari/537.36",
-                locale="en-US",
-            )
-            page = context.new_page()
-
-            page.goto(url, wait_until="domcontentloaded", timeout=30000)
-            _dismiss_popups(page)
-
-            # Detect Cloudflare blocks early (best-effort) and auto-fallback to headed if requested.
-            if _is_cloudflare_blocked(page):
-                browser.close()
-                if headless and _allow_headed_fallback:
-                    _notify(on_event, "Cloudflare block detected in headless; retrying headed...")
-                    return qr_login_from_url(
-                        url,
-                        state_path,
-                        origin=origin,
-                        timeout_sec=timeout_sec,
-                        require_session_key=require_session_key,
-                        session_key_timeout_sec=session_key_timeout_sec,
-                        headless=False,
-                        channel=channel,
-                        get_email_code=get_email_code,
-                        on_event=on_event,
-                        _allow_headed_fallback=False,
-                    )
-                return None, "Cloudflare blocked this browser session. Capture a fresh QR and try again."
-
-            # Wait for gravity cookie
-            start = time.time()
-            gravity = None
-            while time.time() - start < timeout_sec:
-                cookies = context.cookies()
-                gravity = next((c["value"] for c in cookies if c.get("name") == "gravity"), None)
-                if gravity:
-                    break
-                time.sleep(1)
-
-            if not gravity:
-                browser.close()
-                return None, "QR code expired or invalid. Generate a new one."
-
-            if require_session_key:
-                sk, verification_seen = _wait_for_session_key(
-                    page, timeout_sec=session_key_timeout_sec, get_email_code=get_email_code, on_event=on_event
+        try:
+            ensure_playwright_browsers_path()
+            with sync_playwright() as p:
+                stealth = Stealth()
+                stealth.hook_playwright_context(p)
+                args = ["--disable-blink-features=AutomationControlled"]
+                if headless:
+                    args = ["--headless=new", *args]
+                # Prefer a real Chrome channel to reduce automation friction (also in headless).
+                launch_channel = channel if channel is not None else "chrome"
+                browser = _launch_chromium(p, headless=headless, args=args, channel=launch_channel)
+                context = browser.new_context(
+                    viewport={"width": 412, "height": 915},
+                    device_scale_factor=2.625,
+                    is_mobile=True,
+                    has_touch=True,
+                    user_agent="Mozilla/5.0 (Linux; Android 14; Pixel 8 Pro) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Mobile Safari/537.36",
+                    locale="en-US",
                 )
-                if not sk:
-                    # If verification was detected but we couldn't complete it headless, fall back to headed
-                    # using the *current* session state (no need for a fresh QR).
-                    if headless and verification_seen and _allow_headed_fallback:
-                        _notify(on_event, "Email verification needs manual completion; opening headed browser...")
-                        context.storage_state(path=str(state_path))
-                        browser.close()
-                        remaining = max(30.0, float(session_key_timeout_sec))
-                        sk2 = _manual_verification_headed(state_path=state_path, origin=origin, timeout_sec=remaining)
-                        if not sk2:
-                            return None, "Login incomplete: email verification not completed in time."
-                        sk = sk2
-                    else:
-                        browser.close()
-                        return None, "Login incomplete: grvt_ss_on_chain not found (finish email verification and try again)."
+                page = context.new_page()
 
-            # Populate account/subaccount IDs for API usage.
-            _populate_account_ids(page)
+                page.goto(url, wait_until="domcontentloaded", timeout=30000)
+                _dismiss_popups(page)
 
-            context.storage_state(path=str(state_path))
-            browser.close()
+                # Detect Cloudflare blocks early (best-effort) and auto-fallback to headed if requested.
+                if _is_cloudflare_blocked(page):
+                    browser.close()
+                    if headless and _allow_headed_fallback:
+                        _notify(on_event, "Cloudflare block detected in headless; retrying headed...")
+                        return qr_login_from_url(
+                            url,
+                            state_path,
+                            origin=origin,
+                            timeout_sec=timeout_sec,
+                            require_session_key=require_session_key,
+                            session_key_timeout_sec=session_key_timeout_sec,
+                            headless=False,
+                            channel=channel,
+                            get_email_code=get_email_code,
+                            on_event=on_event,
+                            _allow_headed_fallback=False,
+                        )
+                    return None, "Cloudflare blocked this browser session. Capture a fresh QR and try again."
 
-        save_cookie_cache(gravity)
-        return gravity, f"Login successful. Cookie: {gravity[:12]}..."
+                # Wait for gravity cookie
+                start = time.time()
+                gravity = None
+                while time.time() - start < timeout_sec:
+                    cookies = context.cookies()
+                    gravity = next((c["value"] for c in cookies if c.get("name") == "gravity"), None)
+                    if gravity:
+                        break
+                    time.sleep(1)
 
-    except Exception as e:
-        return None, f"Login failed: {e}"
+                if not gravity:
+                    browser.close()
+                    return None, "QR code expired or invalid. Generate a new one."
+
+                if require_session_key:
+                    sk, verification_seen = _wait_for_session_key(
+                        page, timeout_sec=session_key_timeout_sec, get_email_code=get_email_code, on_event=on_event
+                    )
+                    if not sk:
+                        # If verification was detected but we couldn't complete it headless, fall back to headed
+                        # using the *current* session state (no need for a fresh QR).
+                        if headless and verification_seen and _allow_headed_fallback:
+                            _notify(on_event, "Email verification needs manual completion; opening headed browser...")
+                            context.storage_state(path=str(state_path))
+                            browser.close()
+                            remaining = max(30.0, float(session_key_timeout_sec))
+                            sk2 = _manual_verification_headed(state_path=state_path, origin=origin, timeout_sec=remaining)
+                            if not sk2:
+                                return None, "Login incomplete: email verification not completed in time."
+                            sk = sk2
+                        else:
+                            browser.close()
+                            return None, "Login incomplete: grvt_ss_on_chain not found (finish email verification and try again)."
+
+                # Populate account/subaccount IDs for API usage.
+                _populate_account_ids(page)
+
+                context.storage_state(path=str(state_path))
+                browser.close()
+
+            save_cookie_cache(gravity)
+            return gravity, f"Login successful. Cookie: {gravity[:12]}..."
+
+        except Exception as e:
+            return None, f"Login failed: {e}"
+
+    return run_sync_playwright(_run)
 
 
 def qr_login(
@@ -585,7 +592,6 @@ def qr_login(
 ) -> str | None:
     """Login via QR code image. Returns gravity cookie or None."""
     import time
-    from playwright.sync_api import sync_playwright
 
     ensure_playwright_browsers_path()
     # Decode QR
@@ -606,81 +612,85 @@ def qr_login(
     if not headless:
         print("(Browser will be visible. Wait for login to complete...)")
 
-    with sync_playwright() as p:
-        # Prefer a real Chrome channel if available, but fall back to bundled Chromium.
-        launch_channel = channel if channel is not None else "chrome"
-        browser = _launch_chromium(p, headless=headless, channel=launch_channel)
-        context = browser.new_context(viewport={"width": 1280, "height": 800})
-        page = context.new_page()
+    def _run() -> tuple[str | None, bool]:
+        from playwright.sync_api import sync_playwright
 
-        page.goto(url, timeout=60000)
-        _dismiss_popups(page)
+        with sync_playwright() as p:
+            # Prefer a real Chrome channel if available, but fall back to bundled Chromium.
+            launch_channel = channel if channel is not None else "chrome"
+            browser = _launch_chromium(p, headless=headless, channel=launch_channel)
+            context = browser.new_context(viewport={"width": 1280, "height": 800})
+            page = context.new_page()
 
-        # Wait for redirect/navigation after QR processing
-        try:
-            page.wait_for_url("**/trade**", timeout=timeout_sec * 1000)
-        except Exception:
-            pass  # May not redirect to trade page
+            page.goto(url, timeout=60000)
+            _dismiss_popups(page)
 
-        # Wait for gravity cookie
-        start = time.time()
-        gravity = None
-        while time.time() - start < timeout_sec:
+            # Wait for redirect/navigation after QR processing
             try:
-                cookies = context.cookies()
-                gravity = next((c["value"] for c in cookies if c.get("name") == "gravity"), None)
-                if gravity:
-                    break
-                time.sleep(0.5)
+                page.wait_for_url("**/trade**", timeout=timeout_sec * 1000)
             except Exception:
-                break
+                pass  # May not redirect to trade page
 
-        if not gravity:
-            print("Error: QR code may be expired. Generate a new one from grvt.io")
-            browser.close()
-            return None
-
-        if require_session_key:
-            deadline = time.time() + session_key_timeout_sec
-            sk = None
-            prompted = False
-            while time.time() < deadline:
-                _dismiss_popups(page)
+            # Wait for gravity cookie
+            start = time.time()
+            gravity = None
+            while time.time() - start < timeout_sec:
                 try:
-                    sk = page.evaluate("() => window.localStorage.getItem('grvt_ss_on_chain')")  # type: ignore[arg-type]
+                    cookies = context.cookies()
+                    gravity = next((c["value"] for c in cookies if c.get("name") == "gravity"), None)
+                    if gravity:
+                        break
+                    time.sleep(0.5)
                 except Exception:
-                    sk = None
-                if sk:
                     break
-                if not prompted:
-                    did = _try_submit_email_code(
-                        page,
-                        get_email_code=lambda: input("Enter GRVT email verification code: ").strip(),
-                        on_event=lambda m: print(m),
-                    )
-                    if did:
-                        prompted = True
-                time.sleep(0.5)
 
-            if not sk:
-                print("Error: Login incomplete: grvt_ss_on_chain not found (finish email verification and try again).")
+            if not gravity:
                 browser.close()
-                return None
+                return None, False
 
-        # Populate account/subaccount IDs for API usage.
-        _populate_account_ids(page)
+            if require_session_key:
+                deadline = time.time() + session_key_timeout_sec
+                sk = None
+                prompted = False
+                while time.time() < deadline:
+                    _dismiss_popups(page)
+                    try:
+                        sk = page.evaluate("() => window.localStorage.getItem('grvt_ss_on_chain')")  # type: ignore[arg-type]
+                    except Exception:
+                        sk = None
+                    if sk:
+                        break
+                    if not prompted:
+                        did = _try_submit_email_code(
+                            page,
+                            get_email_code=lambda: input("Enter GRVT email verification code: ").strip(),
+                            on_event=lambda m: print(m),
+                        )
+                        if did:
+                            prompted = True
+                    time.sleep(0.5)
 
-        # Save state
-        context.storage_state(path=str(state_path))
+                if not sk:
+                    browser.close()
+                    return None, False
 
-        # Validate session key in localStorage
-        try:
-            local_storage = page.evaluate("() => Object.keys(localStorage)")
-            has_session_key = any("privateKey" in k.lower() or "session" in k.lower() for k in local_storage)
-        except Exception:
-            has_session_key = False
+            # Populate account/subaccount IDs for API usage.
+            _populate_account_ids(page)
 
-        browser.close()
+            # Save state
+            context.storage_state(path=str(state_path))
+
+            # Validate session key in localStorage
+            try:
+                local_storage = page.evaluate("() => Object.keys(localStorage)")
+                has_session_key = any("privateKey" in k.lower() or "session" in k.lower() for k in local_storage)
+            except Exception:
+                has_session_key = False
+
+            browser.close()
+            return gravity, has_session_key
+
+    gravity, has_session_key = run_sync_playwright(_run)
 
     if not has_session_key:
         print("Warning: Session key not found in localStorage - auth may be incomplete")

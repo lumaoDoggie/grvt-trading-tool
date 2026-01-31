@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+from grvt_volume_boost.playwright_compat import run_sync_playwright
+
 
 def _parse_jsonish_value(raw: str) -> str:
     """Parse values stored via JSON.stringify, falling back to the raw string."""
@@ -85,10 +87,7 @@ def ensure_account_ids(state_path: Path, *, origin: str) -> tuple[str | None, st
         return acc_id, chain_sa
 
     # Cloudflare blocks direct Python requests; do the GraphQL query via a real browser context.
-    from playwright.sync_api import sync_playwright
-    from playwright_stealth import Stealth
     from grvt_volume_boost.settings import EDGE_URL
-    from grvt_volume_boost.runtime import ensure_playwright_browsers_path
 
     # NOTE: The query string must contain real newlines. If it contains literal "\n"
     # sequences (backslash + n), the GraphQL parser will reject it.
@@ -107,7 +106,11 @@ def ensure_account_ids(state_path: Path, *, origin: str) -> tuple[str | None, st
 }
 """
 
-    try:
+    def _run() -> dict | None:
+        from playwright.sync_api import sync_playwright
+        from playwright_stealth import Stealth
+        from grvt_volume_boost.runtime import ensure_playwright_browsers_path
+
         ensure_playwright_browsers_path()
         with sync_playwright() as p:
             stealth = Stealth()
@@ -157,12 +160,15 @@ def ensure_account_ids(state_path: Path, *, origin: str) -> tuple[str | None, st
                     if (accountID) window.localStorage.setItem('grvt:account_id', accountID);
                     return { ok:true, chainSubAccountID: String(chainSub), accountID };
                 }""",
-                 {"query": query, "selectedSub": selected_sub, "edgeUrl": EDGE_URL},
-             )
+                {"query": query, "selectedSub": selected_sub, "edgeUrl": EDGE_URL},
+            )
 
             context.storage_state(path=str(state_path))
             browser.close()
+            return result if isinstance(result, dict) else None
 
+    try:
+        result = run_sync_playwright(_run)
         if isinstance(result, dict) and result.get("ok"):
             acc_id = str(result.get("accountID") or "") or acc_id
             chain_sa = str(result.get("chainSubAccountID") or "") or chain_sa
@@ -270,10 +276,7 @@ def fetch_subaccounts(state_path: Path, *, origin: str) -> list[dict]:
     if not state_path.exists():
         raise FileNotFoundError(state_path)
 
-    from playwright.sync_api import sync_playwright
-    from playwright_stealth import Stealth
     from grvt_volume_boost.settings import EDGE_URL
-    from grvt_volume_boost.runtime import ensure_playwright_browsers_path
 
     query = """query UserSubAccountsQuery {
   userSubAccounts {
@@ -291,44 +294,52 @@ def fetch_subaccounts(state_path: Path, *, origin: str) -> list[dict]:
 }
 """
 
-    ensure_playwright_browsers_path()
-    with sync_playwright() as p:
-        stealth = Stealth()
-        stealth.hook_playwright_context(p)
-        browser = p.chromium.launch(
-            headless=True,
-            args=["--headless=new", "--disable-blink-features=AutomationControlled"],
-            channel="chrome",
-        )
-        context = browser.new_context(storage_state=str(state_path), viewport={"width": 1280, "height": 720}, locale="en-US")
-        page = context.new_page()
-        page.goto(origin, wait_until="domcontentloaded", timeout=60000)
+    def _run() -> dict:
+        from playwright.sync_api import sync_playwright
+        from playwright_stealth import Stealth
+        from grvt_volume_boost.runtime import ensure_playwright_browsers_path
 
-        data = page.evaluate(
-            """async ({query, edgeUrl}) => {
-                const cidRaw = window.localStorage.getItem('grvt:client_id');
-                let cid = null;
-                if (cidRaw) {
-                  try { cid = JSON.parse(cidRaw); } catch(e) { cid = cidRaw; }
-                }
-                const headers = { 'content-type': 'application/json', 'x-api-source': 'WEB' };
-                if (cid) headers['x-client-session-id'] = String(cid);
-                try { headers['x-trace-id'] = crypto.randomUUID(); } catch(e) {}
-                headers['x-device-fingerprint'] = `UserAgent=${navigator.userAgent}`;
-                 const resp = await fetch(edgeUrl + '/query', {
-                   method: 'POST',
-                   headers,
-                   credentials: 'include',
-                   body: JSON.stringify({ query })
-                 });
-                const text = await resp.text();
-                try { return JSON.parse(text); } catch(e) { return { errors:[{message:'non-json'}], _text: text.slice(0,200), _status: resp.status }; }
-            }""",
-             {"query": query, "edgeUrl": EDGE_URL},
-         )
+        ensure_playwright_browsers_path()
+        with sync_playwright() as p:
+            stealth = Stealth()
+            stealth.hook_playwright_context(p)
+            browser = p.chromium.launch(
+                headless=True,
+                args=["--headless=new", "--disable-blink-features=AutomationControlled"],
+                channel="chrome",
+            )
+            context = browser.new_context(storage_state=str(state_path), viewport={"width": 1280, "height": 720}, locale="en-US")
+            page = context.new_page()
+            page.goto(origin, wait_until="domcontentloaded", timeout=60000)
 
-        context.storage_state(path=str(state_path))
-        browser.close()
+            data = page.evaluate(
+                """async ({query, edgeUrl}) => {
+                    const cidRaw = window.localStorage.getItem('grvt:client_id');
+                    let cid = null;
+                    if (cidRaw) {
+                      try { cid = JSON.parse(cidRaw); } catch(e) { cid = cidRaw; }
+                    }
+                    const headers = { 'content-type': 'application/json', 'x-api-source': 'WEB' };
+                    if (cid) headers['x-client-session-id'] = String(cid);
+                    try { headers['x-trace-id'] = crypto.randomUUID(); } catch(e) {}
+                    headers['x-device-fingerprint'] = `UserAgent=${navigator.userAgent}`;
+                     const resp = await fetch(edgeUrl + '/query', {
+                       method: 'POST',
+                       headers,
+                       credentials: 'include',
+                       body: JSON.stringify({ query })
+                     });
+                    const text = await resp.text();
+                    try { return JSON.parse(text); } catch(e) { return { errors:[{message:'non-json'}], _text: text.slice(0,200), _status: resp.status }; }
+                }""",
+                {"query": query, "edgeUrl": EDGE_URL},
+            )
+
+            context.storage_state(path=str(state_path))
+            browser.close()
+            return data or {}
+
+    data = run_sync_playwright(_run)
 
     subs = (((data or {}).get("data") or {}).get("userSubAccounts") or {}).get("data") or {}
     out = []

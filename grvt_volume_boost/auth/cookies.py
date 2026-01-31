@@ -6,6 +6,7 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from pathlib import Path
 
+from grvt_volume_boost.playwright_compat import run_sync_playwright
 from grvt_volume_boost.runtime import ensure_playwright_browsers_path
 from grvt_volume_boost.settings import COOKIE_CACHE_FILE, ORIGIN
 from grvt_volume_boost.i18n import tr
@@ -159,42 +160,49 @@ def get_fresh_cookie(state_path: Path, *, origin: str = ORIGIN, force_refresh: b
         except Exception:
             pass
 
+    gravity = None
     try:
-        from playwright.sync_api import sync_playwright
-        from playwright_stealth import Stealth
+        def _run() -> str | None:
+            from playwright.sync_api import sync_playwright
+            from playwright_stealth import Stealth
 
-        ensure_playwright_browsers_path()
-        with sync_playwright() as p:
-            stealth = Stealth()
-            stealth.hook_playwright_context(p)
-            browser = p.chromium.launch(headless=True, args=["--headless=new", "--disable-blink-features=AutomationControlled"])
-            context = browser.new_context(
-                storage_state=state,
-                viewport={"width": 412, "height": 915},
-                device_scale_factor=2.625,
-                is_mobile=True,
-                has_touch=True,
-                user_agent="Mozilla/5.0 (Linux; Android 14; Pixel 8 Pro) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Mobile Safari/537.36",
-                locale="en-US",
-            )
-            page = context.new_page()
+            ensure_playwright_browsers_path()
+            with sync_playwright() as p:
+                stealth = Stealth()
+                stealth.hook_playwright_context(p)
+                browser = p.chromium.launch(
+                    headless=True, args=["--headless=new", "--disable-blink-features=AutomationControlled"]
+                )
+                context = browser.new_context(
+                    storage_state=state,
+                    viewport={"width": 412, "height": 915},
+                    device_scale_factor=2.625,
+                    is_mobile=True,
+                    has_touch=True,
+                    user_agent="Mozilla/5.0 (Linux; Android 14; Pixel 8 Pro) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Mobile Safari/537.36",
+                    locale="en-US",
+                )
+                page = context.new_page()
 
-            # `networkidle` can be slow/flaky due to analytics/streams; `domcontentloaded` is enough.
-            page.goto(origin, wait_until="domcontentloaded", timeout=60000)
+                # `networkidle` can be slow/flaky due to analytics/streams; `domcontentloaded` is enough.
+                page.goto(origin, wait_until="domcontentloaded", timeout=60000)
 
-            # Wait for cookie to appear
-            start = time.time()
-            gravity = None
-            while time.time() - start < 15.0:
-                cookies = context.cookies()
-                gravity = next((c["value"] for c in cookies if c.get("name") == "gravity"), None)
-                if gravity:
-                    break
-                page.wait_for_timeout(500)
+                # Wait for cookie to appear
+                start = time.time()
+                g = None
+                while time.time() - start < 15.0:
+                    cookies = context.cookies()
+                    g = next((c["value"] for c in cookies if c.get("name") == "gravity"), None)
+                    if g:
+                        break
+                    page.wait_for_timeout(500)
 
-            if gravity:
-                context.storage_state(path=str(state_path))
-            browser.close()
+                if g:
+                    context.storage_state(path=str(state_path))
+                browser.close()
+                return g
+
+        gravity = run_sync_playwright(_run)
     except Exception as e:
         import traceback
         print(f"[Cookie Refresh] ERROR: {type(e).__name__}: {e}")
