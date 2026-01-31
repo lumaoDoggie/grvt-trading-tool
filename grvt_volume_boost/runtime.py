@@ -34,3 +34,38 @@ def ensure_playwright_browsers_path() -> None:
     if bundled.exists():
         os.environ["PLAYWRIGHT_BROWSERS_PATH"] = str(bundled)
 
+
+def ensure_tls_trust() -> None:
+    """Best-effort TLS trust configuration for packaged Windows builds.
+
+    Symptoms: SSLCertVerificationError "unable to get local issuer certificate".
+    Causes:
+    - Python/OpenSSL can't find a CA bundle (common in embedded/packaged envs), or
+    - a corporate proxy performs TLS interception and the org root cert is only in OS trust store.
+
+    Strategy:
+    - Prefer `truststore` (uses OS trust store on Windows/macOS).
+    - Fallback to `certifi` and set SSL_CERT_FILE / REQUESTS_CA_BUNDLE.
+    """
+    # Respect explicit overrides.
+    if os.getenv("SSL_CERT_FILE") or os.getenv("REQUESTS_CA_BUNDLE"):
+        return
+
+    # 1) Use OS trust store if available.
+    try:
+        import truststore  # type: ignore
+
+        truststore.inject_into_ssl()
+        return
+    except Exception:
+        pass
+
+    # 2) Fallback to certifi bundle.
+    try:
+        import certifi  # type: ignore
+
+        ca = certifi.where()
+        os.environ.setdefault("SSL_CERT_FILE", ca)
+        os.environ.setdefault("REQUESTS_CA_BUNDLE", ca)
+    except Exception:
+        pass
