@@ -3,6 +3,7 @@ from __future__ import annotations
 import random
 import time
 from decimal import Decimal, ROUND_DOWN
+from typing import Callable
 
 from grvt_volume_boost.clients.trades import post
 from grvt_volume_boost.config import AccountConfig
@@ -66,6 +67,33 @@ def get_position_size(acc: AccountConfig, cookie: str, instrument: str) -> Decim
         return Decimal(0)
     except Exception as e:
         debug("get_position_size failed", exc=e, extra={"instrument": instrument})
+        return None
+
+
+def get_all_positions_map(acc: AccountConfig, cookie: str) -> dict[str, Decimal] | None:
+    """Return {instrument: size} for all non-zero positions, or None on error/auth failure."""
+    try:
+        r = post(
+            "/full/v1/positions",
+            acc=acc,
+            cookie=cookie,
+            payload={"sub_account_id": acc.sub_account_id},
+            timeout=30,
+        )
+        data = r.json()
+        if "result" not in data:
+            return None
+        out: dict[str, Decimal] = {}
+        for p in data["result"]:
+            inst = p.get("instrument")
+            if not inst:
+                continue
+            sz = Decimal(str(p.get("size", "0") or "0"))
+            if sz != 0:
+                out[str(inst)] = sz
+        return out
+    except Exception as e:
+        debug("get_all_positions_map failed", exc=e)
         return None
 
 
@@ -165,6 +193,49 @@ def set_initial_leverage(acc: AccountConfig, cookie: str, *, instrument: str, le
     except Exception as e:
         debug("set_initial_leverage failed", exc=e, extra={"instrument": instrument, "leverage": leverage})
         return False
+
+
+def ensure_initial_leverage(
+    acc: AccountConfig,
+    cookie: str,
+    *,
+    instrument: str,
+    target_leverage: str = "50",
+    on_log: Callable[[str], None] | None = None,
+) -> str | None:
+    """Best-effort: set initial leverage to target, otherwise fall back to highest accepted.
+
+    Returns the leverage that was successfully set (as a string), or None if all attempts failed.
+    """
+    # Common venue caps; keep descending so the first success is the highest accepted.
+    candidates = ["50", "25", "20", "15", "10", "8", "5", "3", "2", "1"]
+    target = str(target_leverage).strip()
+    if target and target not in candidates:
+        candidates = [target] + candidates
+    else:
+        # Move target to the front if it exists.
+        if target in candidates:
+            candidates = [target] + [c for c in candidates if c != target]
+
+    for lev in candidates:
+        ok = set_initial_leverage(acc, cookie, instrument=instrument, leverage=lev)
+        if ok:
+            if on_log:
+                try:
+                    if lev == target:
+                        on_log(f"[DEBUG] Set initial leverage: {acc.name} {instrument} -> {lev}x")
+                    else:
+                        on_log(f"[DEBUG] Set initial leverage: {acc.name} {instrument} -> {lev}x (fallback; {target}x not allowed)")
+                except Exception:
+                    pass
+            return lev
+
+    if on_log:
+        try:
+            on_log(f"[WARNING] Failed to set initial leverage: {acc.name} {instrument} (target {target}x)")
+        except Exception:
+            pass
+    return None
 
 
 def build_create_order_payload(

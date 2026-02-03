@@ -13,6 +13,7 @@ from grvt_volume_boost.services.orders import (
     get_margin_ratio,
     get_open_orders,
     get_position_size,
+    ensure_initial_leverage,
     place_ioc_order,
     place_limit_order,
     place_market_order,
@@ -26,6 +27,8 @@ if TYPE_CHECKING:
 
 # Avoid spamming leverage changes on repeated "insufficient margin" retries.
 _LAST_LEVERAGE_BUMP: dict[tuple[str, str], float] = {}
+# Avoid spamming initial leverage "ensure 50x" calls on repeated OPEN attempts.
+_LAST_LEVERAGE_ENSURE: dict[tuple[str, str], tuple[str, float]] = {}
 
 
 def _maybe_bump_initial_leverage(
@@ -80,6 +83,37 @@ def _maybe_bump_initial_leverage(
 
     _log("Auto-set initial leverage failed (no higher leverage accepted)")
     return False
+
+
+def _ensure_initial_leverage_for_open(
+    acc: AccountConfig,
+    cookie: str,
+    instrument: str,
+    *,
+    target_leverage: str = "50",
+    on_log: Callable[[str], None] | None = None,
+) -> str | None:
+    """Best-effort: ensure initial leverage is high before OPEN to control margin usage."""
+    key = (str(acc.sub_account_id), str(instrument))
+    now = time.time()
+    last = _LAST_LEVERAGE_ENSURE.get(key)
+    if last is not None:
+        last_lev, last_ts = last
+        # If we recently ensured leverage for this instrument, avoid repeated REST calls.
+        # Keep it short so it self-heals if the venue rejects temporarily.
+        if (now - last_ts) < 60.0:
+            return last_lev
+
+    lev = ensure_initial_leverage(
+        acc,
+        cookie,
+        instrument=instrument,
+        target_leverage=str(target_leverage),
+        on_log=on_log,
+    )
+    if lev is not None:
+        _LAST_LEVERAGE_ENSURE[key] = (str(lev), now)
+    return lev
 
 
 def _decimal_field(inst_info: dict, key: str, default: str = "0") -> Decimal:
@@ -407,6 +441,12 @@ def place_order_pair(
     # get_position_size already returns Decimal; keep conversion safe anyway.
     pos_a_before = Decimal(str(pos_a_before))
     pos_b_before = Decimal(str(pos_b_before))
+
+    # User-controlled leverage: before OPEN, force initial leverage to 50x (or the highest accepted)
+    # on both accounts so margin/collateral usage is under our control.
+    if is_opening:
+        _ = _ensure_initial_leverage_for_open(acc_a, cookie_a, instrument, target_leverage="50", on_log=on_log)
+        _ = _ensure_initial_leverage_for_open(acc_b, cookie_b, instrument, target_leverage="50", on_log=on_log)
 
     if skip_stability:
         ticker = get_ticker(instrument)

@@ -25,7 +25,12 @@ from grvt_public_api import get_all_instruments
 from grvt_trader import get_position_size, place_market_order
 from grvt_volume_boost.gui_prefs import save_env as _save_gui_env, save_lang as _save_gui_lang
 from grvt_volume_boost.i18n import get_lang as _get_lang, tr as _, tr_log_line as _tr_log_line
-from grvt_volume_boost.services.orders import ping_auth
+from grvt_volume_boost.services.orders import (
+    ensure_initial_leverage,
+    get_all_initial_leverage,
+    get_all_positions_map,
+    ping_auth,
+)
 from grvt_volume_boost.auth.cookies import (
     DEFAULT_COOKIE_REFRESH_INTERVAL_SEC,
     get_fresh_cookie,
@@ -40,7 +45,6 @@ from grvt_volume_boost.auth.session_state import (
     set_local_storage_values,
 )
 from grvt_volume_boost.settings import ORIGIN, SESSION_DIR
-from grvt_volume_boost.clients.trades import post as trades_post
 from grvt_volume_boost.direction import (
     SIDE_POLICY_ACCOUNT1_LONG,
     SIDE_POLICY_ACCOUNT1_SHORT,
@@ -1220,24 +1224,6 @@ def get_market_catalog() -> tuple[list[str], dict[str, dict[str, str]]]:
         return ["CRV_USDT_Perp"], {}
 
 
-def get_all_positions(acc, cookie: str) -> dict[str, Decimal] | None:
-    """Get all positions for account. Returns {instrument: size} or None on error."""
-    try:
-        r = trades_post("/full/v1/positions", acc=acc, cookie=cookie,
-                        payload={"sub_account_id": acc.sub_account_id}, timeout=30)
-        data = r.json()
-        if "result" not in data:
-            return None  # Auth failed or error
-        result = {}
-        for p in data["result"]:
-            size = Decimal(p.get("size", "0"))
-            if size != 0:
-                result[p["instrument"]] = size
-        return result
-    except Exception:
-        return None
-
-
 class PositionMonitorWindow(tk.Toplevel):
     """Window showing positions for both accounts with auto-refresh and WS order tracking."""
 
@@ -1260,6 +1246,9 @@ class PositionMonitorWindow(tk.Toplevel):
         self._last_pos2: dict[str, Decimal] = {}
         self._last_prices: dict[str, Decimal] = {}
         self._last_warn: str = ""
+        self._lev_inflight = threading.Event()
+        self._lev_btn: ttk.Button | None = None
+        self._lev_btn_var: tk.StringVar | None = None
 
         self._build_ui()
 
@@ -1382,6 +1371,11 @@ class PositionMonitorWindow(tk.Toplevel):
         self.ws_status_label = ttk.Label(top, textvariable=self.ws_status_var)
         self.ws_status_label.pack(side=tk.RIGHT, padx=10)
 
+        # Manual leverage control: set all open-position markets to 50x (or highest accepted).
+        self._lev_btn_var = tk.StringVar(value=_("monitor.btn.set_leverage_50"))
+        self._lev_btn = ttk.Button(top, textvariable=self._lev_btn_var, command=self._set_positions_leverage_50x)
+        self._lev_btn.pack(side=tk.RIGHT, padx=6)
+
         # Table with orders column
         columns = ("market", "acc1_size", "acc1_usd", "acc2_size", "acc2_usd", "orders", "status")
         self.tree = ttk.Treeview(self, columns=columns, show="headings", height=15)
@@ -1439,6 +1433,143 @@ class PositionMonitorWindow(tk.Toplevel):
 
         self.protocol("WM_DELETE_WINDOW", self._on_close)
 
+    def _set_positions_leverage_50x(self) -> None:
+        """Set initial leverage to 50x for markets with open positions (both accounts)."""
+        if self._lev_inflight.is_set() or not self.winfo_exists():
+            return
+
+        if not messagebox.askyesno(_("monitor.lev.title"), _("monitor.lev.confirm")):
+            return
+
+        # Disable the button while we run (avoid duplicate clicks and keep UI responsive).
+        self._lev_inflight.set()
+        if self._lev_btn is not None:
+            try:
+                self._lev_btn.configure(state=tk.DISABLED)
+            except Exception:
+                pass
+        if self._lev_btn_var is not None:
+            try:
+                self._lev_btn_var.set(_("monitor.lev.running"))
+            except Exception:
+                pass
+
+        def work():
+            c1 = self.cookie_manager.get_cookie(browser_state_path=self.account_pair.primary.browser_state_path)
+            c2 = self.cookie_manager.get_cookie(browser_state_path=self.account_pair.secondary.browser_state_path)
+            if not c1 or not c2:
+                return ("cookie_error",)
+
+            pos1 = get_all_positions_map(self.account_pair.primary, c1)
+            pos2 = get_all_positions_map(self.account_pair.secondary, c2)
+            if pos1 is None and pos2 is None:
+                return ("auth_error",)
+            pos1 = pos1 or {}
+            pos2 = pos2 or {}
+
+            lev1_items = get_all_initial_leverage(self.account_pair.primary, c1) or []
+            lev2_items = get_all_initial_leverage(self.account_pair.secondary, c2) or []
+
+            def build_lev_map(items: list[dict]) -> dict[str, str]:
+                out: dict[str, str] = {}
+                for it in items:
+                    if not isinstance(it, dict):
+                        continue
+                    inst = it.get("i") or it.get("instrument")
+                    lev = it.get("l") or it.get("leverage")
+                    if inst is None or lev is None:
+                        continue
+                    out[str(inst)] = str(lev)
+                return out
+
+            cur1 = build_lev_map(lev1_items)
+            cur2 = build_lev_map(lev2_items)
+
+            def is_50x(v: str | None) -> bool:
+                if not v:
+                    return False
+                try:
+                    return int(float(str(v))) == 50
+                except Exception:
+                    return str(v).strip() == "50"
+
+            ok = 0
+            fail = 0
+            skipped = 0
+            fallback = 0
+            lines: list[str] = []
+
+            def apply_for(acc, cookie: str, positions: dict[str, Decimal], cur: dict[str, str]) -> None:
+                nonlocal ok, fail, skipped, fallback, lines
+                for inst in sorted(positions.keys()):
+                    if is_50x(cur.get(inst)):
+                        skipped += 1
+                        continue
+                    lev = ensure_initial_leverage(acc, cookie, instrument=inst, target_leverage="50")
+                    if lev is None:
+                        fail += 1
+                        lines.append(f"{acc.name} {inst}: FAILED")
+                        continue
+                    ok += 1
+                    if str(lev) != "50":
+                        fallback += 1
+                    lines.append(f"{acc.name} {inst}: {lev}x")
+
+            apply_for(self.account_pair.primary, c1, pos1, cur1)
+            apply_for(self.account_pair.secondary, c2, pos2, cur2)
+
+            return ("ok", ok, fail, skipped, fallback, lines)
+
+        def finish(res) -> None:
+            try:
+                if not self.winfo_exists():
+                    return
+
+                if self._lev_btn is not None:
+                    try:
+                        self._lev_btn.configure(state=tk.NORMAL)
+                    except Exception:
+                        pass
+                if self._lev_btn_var is not None:
+                    try:
+                        self._lev_btn_var.set(_("monitor.btn.set_leverage_50"))
+                    except Exception:
+                        pass
+
+                if not res:
+                    messagebox.showerror(_("monitor.lev.title"), _("monitor.lev.failed"))
+                    return
+
+                status = res[0]
+                if status == "cookie_error":
+                    messagebox.showerror(_("monitor.lev.title"), _("monitor.lev.cookie_error"))
+                    return
+                if status == "auth_error":
+                    messagebox.showerror(_("monitor.lev.title"), _("monitor.lev.auth_error"))
+                    return
+                if status != "ok":
+                    messagebox.showerror(_("monitor.lev.title"), _("monitor.lev.failed"))
+                    return
+
+                _, ok, fail, skipped, fallback, lines = res
+                body = _("monitor.lev.result", ok=ok, fail=fail, skipped=skipped, fallback=fallback)
+                if lines:
+                    body += "\n\n" + "\n".join(lines[:80])
+                    if len(lines) > 80:
+                        body += "\n..."
+                messagebox.showinfo(_("monitor.lev.title"), body)
+            finally:
+                self._lev_inflight.clear()
+
+        def run():
+            try:
+                res = work()
+            except Exception:
+                res = ("error",)
+            self.after(0, lambda r=res: finish(r))
+
+        threading.Thread(target=run, daemon=True).start()
+
     def _refresh(self) -> None:
         # Avoid overlapping refresh threads (can happen with rapid WS updates).
         if self._refresh_inflight.is_set():
@@ -1458,8 +1589,8 @@ class PositionMonitorWindow(tk.Toplevel):
             if not c2:
                 return "cookie_error", "Account 2: Cookie refresh failed", None, {}
 
-            pos1 = get_all_positions(self.account_pair.primary, c1)
-            pos2 = get_all_positions(self.account_pair.secondary, c2)
+            pos1 = get_all_positions_map(self.account_pair.primary, c1)
+            pos2 = get_all_positions_map(self.account_pair.secondary, c2)
 
             # Allow partial results: show whichever account still works.
             warn = []
@@ -3244,8 +3375,8 @@ class VolumeBoostGUI:
                 # Also preload position data and prices
                 if c1 and c2:
                     try:
-                        pos1 = get_all_positions(self.account_pair.primary, c1)
-                        pos2 = get_all_positions(self.account_pair.secondary, c2)
+                        pos1 = get_all_positions_map(self.account_pair.primary, c1)
+                        pos2 = get_all_positions_map(self.account_pair.secondary, c2)
                         
                         # Fetch prices for all markets with positions
                         prices = {}
@@ -3320,8 +3451,8 @@ class VolumeBoostGUI:
                         pass
                     return
 
-                pos1 = get_all_positions(self.account_pair.primary, c1) or {}
-                pos2 = get_all_positions(self.account_pair.secondary, c2) or {}
+                pos1 = get_all_positions_map(self.account_pair.primary, c1) or {}
+                pos2 = get_all_positions_map(self.account_pair.secondary, c2) or {}
                 unhedged = self._check_unhedged(pos1, pos2)
                 try:
                     self._ui_queue.put(lambda u=unhedged: self._update_monitor_btn(u))
