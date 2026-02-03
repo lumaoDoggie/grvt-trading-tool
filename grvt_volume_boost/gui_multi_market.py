@@ -2632,6 +2632,36 @@ class MarketRunPanel(ttk.Frame):
             )
         return self._sticky_policy_for_run
 
+    def _seed_random_policy_from_existing_positions(
+        self,
+        pair: AccountPair,
+        cookie_primary: str,
+        cookie_secondary: str,
+        market: str,
+    ) -> bool:
+        """If both accounts already have a hedged position, keep building in that direction.
+
+        This makes "Random" deterministic when resuming Build & Hold on an existing hedge:
+        we pick the account that is already long as the long leg for subsequent OPENs.
+        """
+        try:
+            p1 = get_position_size(pair.primary, cookie_primary, market)
+            p2 = get_position_size(pair.secondary, cookie_secondary, market)
+            if p1 is None or p2 is None:
+                return False
+            p1 = Decimal(str(p1))
+            p2 = Decimal(str(p2))
+            if p1 == 0 or p2 == 0:
+                return False
+            # Only seed if it's a proper hedge (opposite signs). If it's unhedged, don't guess.
+            if p1 * p2 >= 0:
+                return False
+
+            self._sticky_policy_for_run = SIDE_POLICY_ACCOUNT1_LONG if p1 > 0 else SIDE_POLICY_ACCOUNT1_SHORT
+            return True
+        except Exception:
+            return False
+
     def _run_thread(self) -> None:
         ticker_monitor: TickerMonitor | None = None
         order_ws: OrderStreamClient | None = None
@@ -2951,6 +2981,9 @@ class MarketRunPanel(ttk.Frame):
             raise RuntimeError(auth_err)
 
         size = self._resolved_size_for_run or Decimal("0")
+        if cfg.direction_policy == SIDE_POLICY_RANDOM and self._sticky_policy_for_run is None:
+            if self._seed_random_policy_from_existing_positions(pair, cookie_primary, cookie_secondary, cfg.market):
+                self._log("[DEBUG] Random direction seeded from existing hedged positions")
         policy_for_run = self._choose_policy_for_run(cfg.mode, cfg.direction_policy)
         self._log(f"Direction policy: {cfg.direction_policy} (resolved={policy_for_run})")
 
@@ -3134,6 +3167,9 @@ class MarketRunPanel(ttk.Frame):
             raise RuntimeError(auth_err)
 
         size = self._resolved_size_for_run or Decimal("0")
+        if cfg.direction_policy == SIDE_POLICY_RANDOM and self._sticky_policy_for_run is None:
+            if self._seed_random_policy_from_existing_positions(pair, cookie_primary, cookie_secondary, cfg.market):
+                self._log("[DEBUG] Random direction seeded from existing hedged positions")
         policy_for_run = self._choose_policy_for_run(cfg.mode, cfg.direction_policy)
         self._log(f"Direction policy: {cfg.direction_policy} (resolved={policy_for_run})")
 
