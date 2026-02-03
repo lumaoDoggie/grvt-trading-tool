@@ -2697,6 +2697,17 @@ class MarketRunPanel(ttk.Frame):
 
             inst_info = get_instrument(cfg.market)
 
+            # If user chose Random direction and there is already a hedged position on this market,
+            # seed the "random" direction BEFORE we spin up WS/maker selection (which also resolves
+            # and locks the random policy).
+            if (
+                cfg.direction_policy == SIDE_POLICY_RANDOM
+                and self._sticky_policy_for_run is None
+                and cfg.mode in ("build_hold", "build_hold_close")
+            ):
+                if self._seed_random_policy_from_existing_positions(pair, cookie_primary, cookie_secondary, cfg.market):
+                    self._log("[DEBUG] Random direction seeded from existing hedged positions")
+
             # Start ticker monitor for price stability (needs 2s warmup)
             self._log("Starting price monitor...")
             ticker_monitor = TickerMonitor(cfg.market, on_error=self._log)
