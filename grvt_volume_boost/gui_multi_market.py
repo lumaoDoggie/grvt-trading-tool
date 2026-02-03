@@ -2686,7 +2686,7 @@ class MarketRunPanel(ttk.Frame):
             elif cfg.mode == "build_hold":
                 self._run_build_hold(cfg, pair, cookie_primary, cookie_secondary, inst_info, ws_client=order_ws)
             else:
-                self._run_close_existing(cfg, pair, cookie_primary, cookie_secondary, inst_info)
+                self._run_close_existing(cfg, pair, cookie_primary, cookie_secondary, inst_info, ws_client=order_ws)
 
         except Exception as e:
             err_msg = str(e)
@@ -3167,7 +3167,14 @@ class MarketRunPanel(ttk.Frame):
         self._log("Use 'Close Existing' mode to close positions when ready.")
 
     def _run_close_existing(
-        self, cfg: RunConfig, pair: AccountPair, cookie_primary: str, cookie_secondary: str, inst_info: dict
+        self,
+        cfg: RunConfig,
+        pair: AccountPair,
+        cookie_primary: str,
+        cookie_secondary: str,
+        inst_info: dict,
+        *,
+        ws_client: OrderStreamClient | None = None,
     ) -> None:
         # Check auth by getting positions (None = auth failed)
         pos1 = get_position_size(pair.primary, cookie_primary, cfg.market)
@@ -3188,7 +3195,10 @@ class MarketRunPanel(ttk.Frame):
         if pos1 * pos2 >= 0:
             raise RuntimeError(f"Positions not hedging! Account1={pos1}, Account2={pos2}")
 
-        max_close = min(abs(pos1), abs(pos2))
+        # Determine who is currently long/short on this market.
+        long_acc = pair.primary if Decimal(str(pos1)) > 0 else pair.secondary
+        short_acc = pair.secondary if long_acc is pair.primary else pair.primary
+        cookie_long, cookie_short = self._cookies_for_accounts(pair, cookie_primary, cookie_secondary, long_acc, short_acc)
 
         # Resolve size per round (same as other modes)
         size_per_round, size_msg = self._resolve_size(inst_info)
@@ -3204,46 +3214,70 @@ class MarketRunPanel(ttk.Frame):
                 self._log("Stop requested, stopping close...")
                 break
 
-            remaining = max_close - closed
-            if remaining <= 0:
+            # Re-read live positions each round: they can change due to fills, lag, or warnings/recovery.
+            pos_long_now = get_position_size(long_acc, cookie_long, cfg.market)
+            pos_short_now = get_position_size(short_acc, cookie_short, cfg.market)
+            if pos_long_now is None or pos_short_now is None:
+                self._log_error("  ERROR: Failed to read positions while closing (auth issue?)")
+                break
+            pos_long_now = Decimal(str(pos_long_now))
+            pos_short_now = Decimal(str(pos_short_now))
+
+            if pos_long_now == 0 and pos_short_now == 0:
                 self._log("All positions closed")
                 break
 
-            close_size = min(size_per_round, remaining)
-            self._log(f"[Round {i+1}/{total_rounds}] Closing {close_size}...")
-
-            # Close both accounts and check results
-            result1 = place_market_order(
-                pair.primary,
-                cookie_primary,
-                cfg.market,
-                inst_info,
-                close_size,
-                is_buying=(pos1 < 0),
-                reduce_only=True,
-            )
-            result2 = place_market_order(
-                pair.secondary,
-                cookie_secondary,
-                cfg.market,
-                inst_info,
-                close_size,
-                is_buying=(pos2 < 0),
-                reduce_only=True,
-            )
-            # Check for failures
-            failed = False
-            if not result1 or not result1.get("r"):
-                self._log_error(f"  Close failed for {pair.primary.name}: {result1}")
-                failed = True
-            if not result2 or not result2.get("r"):
-                self._log_error(f"  Close failed for {pair.secondary.name}: {result2}")
-                failed = True
-            if failed:
+            # Close the hedgeable amount via self-match (maker+IOC). If one side is already flat,
+            # fall back to reduce-only market close for the residual to avoid leaving exposure.
+            hedgeable = min(abs(pos_long_now), abs(pos_short_now))
+            if hedgeable <= 0:
+                self._log_error(
+                    f"Residual unhedged position on {cfg.market}: {long_acc.name}={pos_long_now}, {short_acc.name}={pos_short_now}"
+                )
+                ok1 = self._emergency_close(long_acc, cookie_long, cfg.market, inst_info)
+                ok2 = self._emergency_close(short_acc, cookie_short, cfg.market, inst_info)
+                if ok1 and ok2:
+                    self._log("  Emergency close successful")
+                else:
+                    self._log_error("  Emergency close failed - manual intervention required!")
                 break
 
+            close_size = min(size_per_round, hedgeable)
+            self._log(f"[Round {i+1}/{total_rounds}] CLOSE {close_size} (self-match)")
+
+            success, err = place_order_pair_with_retry(
+                long_acc,
+                short_acc,
+                cookie_long,
+                cookie_short,
+                cfg.market,
+                inst_info,
+                close_size,
+                is_opening=False,
+                max_retries=10,
+                on_log=self._log,
+                price_buffer=self._ticker_monitor.buffer if self._ticker_monitor else None,
+                ws_client=ws_client,
+            )
+            if not success:
+                self._log_error(f"  CLOSE FAILED: {err or 'unknown error'}")
+                self._log("  Attempting emergency close...")
+                ok1 = self._emergency_close(long_acc, cookie_long, cfg.market, inst_info)
+                ok2 = self._emergency_close(short_acc, cookie_short, cfg.market, inst_info)
+                if ok1 and ok2:
+                    self._log("  Emergency close successful")
+                else:
+                    self._log_error("  Emergency close failed - manual intervention required!")
+                break
+
+            if err and "EXTERNAL_FILL_WARNING" in err:
+                self._log(f"  ⚠ {err}")
+                if not self._show_external_fill_warning(err):
+                    self._log("User chose to stop after external fills detected")
+                    break
+
             closed += close_size
-            self._log(f"  OK (closed {closed}/{max_close})")
+            self._log(f"  OK (closed ~{closed})")
             time.sleep(1)
 
         # Final verification (best-effort): positions should be flat after closing.
