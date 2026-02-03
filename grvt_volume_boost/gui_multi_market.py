@@ -9,6 +9,7 @@ import sys
 import threading
 import time
 import tkinter as tk
+import tkinter.font as tkfont
 import webbrowser
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
@@ -81,12 +82,181 @@ def _enable_windows_dpi_awareness() -> None:
         import ctypes
 
         # Best-effort; safe even if already DPI-aware.
+        # Prefer Per-Monitor v2 on modern Windows, then fall back.
+        try:
+            set_ctx = getattr(ctypes.windll.user32, "SetProcessDpiAwarenessContext", None)
+            if set_ctx is not None:
+                # DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2 = (HANDLE)-4
+                if bool(set_ctx(ctypes.c_void_p(-4))):
+                    return
+        except Exception:
+            pass
+
+        try:
+            set_awareness = getattr(ctypes.windll.shcore, "SetProcessDpiAwareness", None)
+            if set_awareness is not None:
+                # PROCESS_PER_MONITOR_DPI_AWARE = 2
+                _ = set_awareness(2)
+                return
+        except Exception:
+            pass
+
         ctypes.windll.user32.SetProcessDPIAware()
     except Exception:
         pass
 
 
 _enable_windows_dpi_awareness()
+
+def _ui_scale(widget: tk.Misc) -> float:
+    """Best-effort UI scale factor (1.0 == 100% / 96 DPI).
+
+    This app uses fixed pixel widths in a few ttk.Treeview tables. On Windows, when
+    Display Scale is >100%, text scales up but those fixed widths do not, which can
+    clip headers/cell text. Use window DPI when available, otherwise fall back to
+    Tk's pixels-per-inch.
+    """
+
+    if os.name == "nt":
+        try:
+            import ctypes
+            from ctypes import wintypes
+
+            # Per-window DPI (best for per-monitor DPI); may return 96 before the window is mapped.
+            get_dpi_for_window = getattr(ctypes.windll.user32, "GetDpiForWindow", None)
+            if get_dpi_for_window is not None:
+                get_dpi_for_window.argtypes = [wintypes.HWND]
+                get_dpi_for_window.restype = ctypes.c_uint
+                dpi = int(get_dpi_for_window(widget.winfo_id()))
+                if dpi > 0 and dpi != 96:
+                    return max(0.75, min(dpi / 96.0, 4.0))
+
+            # System DPI fallback (more reliable at startup).
+            get_dpi_for_system = getattr(ctypes.windll.user32, "GetDpiForSystem", None)
+            if get_dpi_for_system is not None:
+                get_dpi_for_system.argtypes = []
+                get_dpi_for_system.restype = ctypes.c_uint
+                dpi = int(get_dpi_for_system())
+                if dpi > 0:
+                    return max(0.75, min(dpi / 96.0, 4.0))
+
+            # Older fallback: query primary screen device DPI via GDI.
+            LOGPIXELSX = 88
+            get_dc = ctypes.windll.user32.GetDC
+            release_dc = ctypes.windll.user32.ReleaseDC
+            get_device_caps = ctypes.windll.gdi32.GetDeviceCaps
+            get_dc.argtypes = [wintypes.HWND]
+            get_dc.restype = wintypes.HDC
+            release_dc.argtypes = [wintypes.HWND, wintypes.HDC]
+            release_dc.restype = ctypes.c_int
+            get_device_caps.argtypes = [wintypes.HDC, ctypes.c_int]
+            get_device_caps.restype = ctypes.c_int
+
+            hdc = get_dc(0)
+            try:
+                dpi = int(get_device_caps(hdc, LOGPIXELSX))
+                if dpi > 0:
+                    return max(0.75, min(dpi / 96.0, 4.0))
+            finally:
+                try:
+                    release_dc(0, hdc)
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+    try:
+        dpi = float(widget.winfo_fpixels("1i"))
+        if dpi > 0:
+            return max(0.75, min(dpi / 96.0, 4.0))
+    except Exception:
+        pass
+
+    return 1.0
+
+
+def _px(widget: tk.Misc, base_px: int) -> int:
+    """Scale a baseline pixel value by the current UI scale."""
+    try:
+        return int(round(base_px * _ui_scale(widget)))
+    except Exception:
+        return int(base_px)
+
+
+def _set_scaled_geometry(
+    widget: tk.Misc,
+    base_w: int,
+    base_h: int,
+    *,
+    max_w_frac: float = 0.95,
+    max_h_frac: float = 0.9,
+) -> None:
+    """Set DPI-aware geometry, capped to screen size so windows don't open off-screen."""
+    w = _px(widget, base_w)
+    h = _px(widget, base_h)
+    try:
+        sw = int(widget.winfo_screenwidth())
+        sh = int(widget.winfo_screenheight())
+        if sw > 0 and max_w_frac > 0:
+            w = min(w, int(sw * max_w_frac))
+        if sh > 0 and max_h_frac > 0:
+            h = min(h, int(sh * max_h_frac))
+    except Exception:
+        pass
+    try:
+        widget.geometry(f"{w}x{h}")
+    except Exception:
+        pass
+
+
+def _ttk_font(widget: tk.Misc, style_name: str, fallback: str = "TkDefaultFont") -> tkfont.Font:
+    """Resolve ttk style font to a tk Font for measuring."""
+    try:
+        style = ttk.Style(widget)
+        f = style.lookup(style_name, "font")
+        if not f:
+            f = fallback
+        return tkfont.Font(widget, font=f)
+    except Exception:
+        try:
+            return tkfont.nametofont(fallback)
+        except Exception:
+            return tkfont.Font(widget)
+
+
+def _fit_treeview_headings(tree: ttk.Treeview, headings: dict[str, str], *, base_widths: dict[str, int] | None = None) -> None:
+    """Ensure columns are wide enough for localized header text (DPI/font-safe)."""
+    hfont = _ttk_font(tree, "Treeview.Heading")
+    pad = _px(tree, 22)
+    for col, text in headings.items():
+        want = int(hfont.measure(text)) + pad
+        if base_widths and col in base_widths:
+            want = max(want, _px(tree, int(base_widths[col])))
+        try:
+            # `stretch=False` prevents ttk from squeezing columns smaller than the measured header width
+            # when the widget is narrower than the sum of requested widths (use xscroll instead).
+            tree.column(col, width=want, minwidth=want, stretch=False)
+        except Exception:
+            pass
+
+
+def _configure_treeview_rowheight(tree: ttk.Treeview) -> None:
+    """Fix clipped rows at high Windows display scaling by adjusting rowheight."""
+    try:
+        style = ttk.Style(tree)
+        font = _ttk_font(tree, "Treeview")
+        linespace = int(font.metrics("linespace") or 0)
+        want = max(linespace + _px(tree, 8), _px(tree, 20))
+
+        cur = style.lookup("Treeview", "rowheight")
+        try:
+            cur_i = int(cur) if cur not in (None, "") else 0
+        except Exception:
+            cur_i = 0
+
+        style.configure("Treeview", rowheight=max(cur_i, want))
+    except Exception:
+        pass
 
 
 class SetupWindow(tk.Toplevel):
@@ -96,7 +266,7 @@ class SetupWindow(tk.Toplevel):
         super().__init__(parent)
         self.app = app
         self.title(_("setup.title"))
-        self.geometry("560x320")
+        _set_scaled_geometry(self, 560, 320)
         # QR codes are one-time use; store the decoded URL so we don't depend on re-decoding the image later.
         self._qr_payloads: dict[int, dict] = {}  # account_num -> {"url": str, "image": PIL.Image | None}
         self._login_in_progress: set[int] = set()
@@ -440,7 +610,7 @@ class SubaccountSelectDialog(tk.Toplevel):
     def __init__(self, parent: tk.Tk | tk.Toplevel, *, subs: list[dict], account_num: int):
         super().__init__(parent)
         self.title(_("setup.sub_select_title", n=account_num))
-        self.geometry("520x320")
+        _set_scaled_geometry(self, 520, 320)
         self.resizable(False, False)
         self.selected: int | None = None
         self._subs = subs
@@ -878,7 +1048,7 @@ class RecommendMarketsWindow(tk.Toplevel):
     def __init__(self, parent: tk.Tk, markets: list[str], market_meta: dict[str, dict[str, str]]):
         super().__init__(parent)
         self.title(_("reco.title"))
-        self.geometry("500x400")
+        _set_scaled_geometry(self, 500, 400)
         self.transient(parent)
 
         self._markets = markets
@@ -901,19 +1071,33 @@ class RecommendMarketsWindow(tk.Toplevel):
 
         columns = ("market", "spread_ticks", "bid", "ask")
         self._tree = ttk.Treeview(list_frame, columns=columns, show="headings", height=15)
-        self._tree.heading("market", text=_("reco.col.market"))
-        self._tree.heading("spread_ticks", text=_("reco.col.spread"))
-        self._tree.heading("bid", text=_("reco.col.bid"))
-        self._tree.heading("ask", text=_("reco.col.ask"))
-        self._tree.column("market", width=180)
-        self._tree.column("spread_ticks", width=100, anchor=tk.E)
-        self._tree.column("bid", width=100, anchor=tk.E)
-        self._tree.column("ask", width=100, anchor=tk.E)
+        _configure_treeview_rowheight(self._tree)
+        headings = {
+            "market": _("reco.col.market"),
+            "spread_ticks": _("reco.col.spread"),
+            "bid": _("reco.col.bid"),
+            "ask": _("reco.col.ask"),
+        }
+        self._tree.heading("market", text=headings["market"])
+        self._tree.heading("spread_ticks", text=headings["spread_ticks"])
+        self._tree.heading("bid", text=headings["bid"])
+        self._tree.heading("ask", text=headings["ask"])
+        self._tree.column("market", anchor=tk.W)
+        self._tree.column("spread_ticks", anchor=tk.E)
+        self._tree.column("bid", anchor=tk.E)
+        self._tree.column("ask", anchor=tk.E)
+        _fit_treeview_headings(
+            self._tree,
+            headings,
+            base_widths={"market": 180, "spread_ticks": 100, "bid": 100, "ask": 100},
+        )
 
         scrollbar = ttk.Scrollbar(list_frame, orient=tk.VERTICAL, command=self._tree.yview)
-        self._tree.configure(yscrollcommand=scrollbar.set)
+        xscroll = ttk.Scrollbar(list_frame, orient=tk.HORIZONTAL, command=self._tree.xview)
+        self._tree.configure(yscrollcommand=scrollbar.set, xscrollcommand=xscroll.set)
         self._tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        xscroll.pack(side=tk.BOTTOM, fill=tk.X)
 
         btn_frame = ttk.Frame(self)
         btn_frame.pack(fill=tk.X, padx=10, pady=5)
@@ -1060,7 +1244,7 @@ class PositionMonitorWindow(tk.Toplevel):
     def __init__(self, parent: tk.Tk, account_pair: AccountPair, cookie_manager: "CookieManager", cached_positions: tuple | None = None):
         super().__init__(parent)
         self.title(_("monitor.title"))
-        self.geometry("820x400")  # Wider for orders column
+        _set_scaled_geometry(self, 820, 400)  # Wider for orders column (scaled for DPI)
         self.account_pair = account_pair
         self.cookie_manager = cookie_manager
         self._refresh_job: str | None = None
@@ -1201,21 +1385,44 @@ class PositionMonitorWindow(tk.Toplevel):
         # Table with orders column
         columns = ("market", "acc1_size", "acc1_usd", "acc2_size", "acc2_usd", "orders", "status")
         self.tree = ttk.Treeview(self, columns=columns, show="headings", height=15)
-        self.tree.heading("market", text=_("monitor.col.market"))
-        self.tree.heading("acc1_size", text=_("monitor.col.a1_size"))
-        self.tree.heading("acc1_usd", text=_("monitor.col.a1_usd"))
-        self.tree.heading("acc2_size", text=_("monitor.col.a2_size"))
-        self.tree.heading("acc2_usd", text=_("monitor.col.a2_usd"))
-        self.tree.heading("orders", text=_("monitor.col.orders"))
-        self.tree.heading("status", text=_("monitor.col.status"))
+        _configure_treeview_rowheight(self.tree)
+        headings = {
+            "market": _("monitor.col.market"),
+            "acc1_size": _("monitor.col.a1_size"),
+            "acc1_usd": _("monitor.col.a1_usd"),
+            "acc2_size": _("monitor.col.a2_size"),
+            "acc2_usd": _("monitor.col.a2_usd"),
+            "orders": _("monitor.col.orders"),
+            "status": _("monitor.col.status"),
+        }
+        self.tree.heading("market", text=headings["market"])
+        self.tree.heading("acc1_size", text=headings["acc1_size"])
+        self.tree.heading("acc1_usd", text=headings["acc1_usd"])
+        self.tree.heading("acc2_size", text=headings["acc2_size"])
+        self.tree.heading("acc2_usd", text=headings["acc2_usd"])
+        self.tree.heading("orders", text=headings["orders"])
+        self.tree.heading("status", text=headings["status"])
 
-        self.tree.column("market", width=140)
-        self.tree.column("acc1_size", width=90, anchor=tk.E)
-        self.tree.column("acc1_usd", width=90, anchor=tk.E)
-        self.tree.column("acc2_size", width=90, anchor=tk.E)
-        self.tree.column("acc2_usd", width=90, anchor=tk.E)
-        self.tree.column("orders", width=80, anchor=tk.CENTER)
-        self.tree.column("status", width=90)
+        self.tree.column("market", anchor=tk.W)
+        self.tree.column("acc1_size", anchor=tk.E)
+        self.tree.column("acc1_usd", anchor=tk.E)
+        self.tree.column("acc2_size", anchor=tk.E)
+        self.tree.column("acc2_usd", anchor=tk.E)
+        self.tree.column("orders", anchor=tk.CENTER)
+        self.tree.column("status", anchor=tk.W)
+        _fit_treeview_headings(
+            self.tree,
+            headings,
+            base_widths={
+                "market": 140,
+                "acc1_size": 90,
+                "acc1_usd": 90,
+                "acc2_size": 90,
+                "acc2_usd": 90,
+                "orders": 80,
+                "status": 90,
+            },
+        )
 
         # Tags for coloring
         self.tree.tag_configure("hedge", foreground="green")
@@ -1223,10 +1430,12 @@ class PositionMonitorWindow(tk.Toplevel):
         self.tree.tag_configure("same_side", foreground="red")
 
         scrollbar = ttk.Scrollbar(self, orient=tk.VERTICAL, command=self.tree.yview)
-        self.tree.configure(yscrollcommand=scrollbar.set)
+        xscroll = ttk.Scrollbar(self, orient=tk.HORIZONTAL, command=self.tree.xview)
+        self.tree.configure(yscrollcommand=scrollbar.set, xscrollcommand=xscroll.set)
 
         self.tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=5, pady=5)
         scrollbar.pack(side=tk.RIGHT, fill=tk.Y, pady=5)
+        xscroll.pack(side=tk.BOTTOM, fill=tk.X, padx=5, pady=(0, 5))
 
         self.protocol("WM_DELETE_WINDOW", self._on_close)
 
@@ -1916,13 +2125,13 @@ class MarketRunPanel(ttk.Frame):
         def show_dialog():
             dialog = tk.Toplevel(self)
             dialog.title("⚠ External Fills Detected")
-            dialog.geometry("480x180")
+            dialog.geometry(f"{_px(dialog, 480)}x{_px(dialog, 180)}")
             dialog.transient(self)
             dialog.grab_set()
             
             ttk.Label(dialog, text="⚠ External fills detected!", 
                       font=("", 11, "bold"), foreground="orange").pack(pady=(15, 5))
-            ttk.Label(dialog, text=warning_msg, wraplength=450).pack(pady=5)
+            ttk.Label(dialog, text=warning_msg, wraplength=_px(dialog, 450)).pack(pady=5)
             ttk.Label(dialog, text="Market might be unstable. Continue remaining iterations?").pack(pady=5)
             
             btn_frame = ttk.Frame(dialog)
@@ -2961,7 +3170,8 @@ class VolumeBoostGUI:
         self.root = tk.Tk()
         env = (os.getenv("GRVT_ENV", "prod") or "prod").strip().lower()
         self.root.title(_("app.title.testnet") if env == "testnet" else _("app.title"))
-        self.root.geometry("720x720")
+        # Use DPI-aware sizing on Windows so controls aren't clipped at high display scaling.
+        _set_scaled_geometry(self.root, 720, 720, max_w_frac=0.95, max_h_frac=0.9)
         self._panels: list[MarketRunPanel] = []
         self._setup_window: SetupWindow | None = None
         self._about_window: tk.Toplevel | None = None
@@ -2982,6 +3192,18 @@ class VolumeBoostGUI:
         self.reload_accounts()
 
         self._build_ui()
+        # Ensure the window is not smaller than the layout requires (prevents "missing" toolbar buttons).
+        try:
+            self.root.update_idletasks()
+            req_w = int(self.root.winfo_reqwidth())
+            req_h = int(self.root.winfo_reqheight())
+            sw = int(self.root.winfo_screenwidth())
+            sh = int(self.root.winfo_screenheight())
+            min_w = min(req_w, int(sw * 0.98)) if sw > 0 else req_w
+            min_h = min(req_h, int(sh * 0.98)) if sh > 0 else req_h
+            self.root.minsize(min_w, min_h)
+        except Exception:
+            pass
         self._load_markets_async()
         self._schedule_market_refresh()  # Refresh market catalog every 2 minutes
         self._preload_cookies_async()  # Preload cookies in background
@@ -3168,16 +3390,23 @@ class VolumeBoostGUI:
         top = ttk.Frame(self.root, padding=10)
         top.pack(fill=tk.X)
 
-        ttk.Button(top, text=_("btn.add_market"), command=self.add_tab).pack(side=tk.LEFT)
-        ttk.Button(top, text=_("btn.remove_current"), command=self.remove_current_tab).pack(side=tk.LEFT, padx=8)
+        # At high Windows display scaling, a single-row toolbar can push buttons off-screen.
+        # Use a two-row layout so all controls remain visible without resizing the window.
+        row1 = ttk.Frame(top)
+        row1.pack(fill=tk.X)
+        row2 = ttk.Frame(top)
+        row2.pack(fill=tk.X, pady=(_px(self.root, 6), 0))
+
+        ttk.Button(row1, text=_("btn.add_market"), command=self.add_tab).pack(side=tk.LEFT)
+        ttk.Button(row1, text=_("btn.remove_current"), command=self.remove_current_tab).pack(side=tk.LEFT, padx=8)
 
         # Environment toggle (Prod/Testnet). We restart the app to apply it safely since
         # many modules read endpoints at import time.
         cur_env = (os.getenv("GRVT_ENV", "prod") or "prod").strip().lower()
         self._env_var = tk.StringVar(value=_("env.testnet") if cur_env == "testnet" else _("env.prod"))
-        ttk.Label(top, text=_("label.env")).pack(side=tk.LEFT, padx=(10, 2))
+        ttk.Label(row1, text=_("label.env")).pack(side=tk.LEFT, padx=(10, 2))
         self._env_combo = ttk.Combobox(
-            top,
+            row1,
             textvariable=self._env_var,
             values=[_("env.prod"), _("env.testnet")],
             state="readonly",
@@ -3189,24 +3418,24 @@ class VolumeBoostGUI:
         # Language toggle (English/Chinese). Restart for consistency.
         cur_lang = _get_lang()
         lang_btn_text = _("btn.lang_to_zh") if cur_lang == "en" else _("btn.lang_to_en")
-        self._lang_btn = ttk.Button(top, text=lang_btn_text, command=self._toggle_lang)
+        self._lang_btn = ttk.Button(row1, text=lang_btn_text, command=self._toggle_lang)
         self._lang_btn.pack(side=tk.LEFT, padx=(8, 0))
          
         # Monitor button with dynamic styling for unhedged position warning
-        self._monitor_btn = tk.Button(top, text=_("btn.monitor"), command=self._open_monitor)
-        self._monitor_btn.pack(side=tk.LEFT, padx=8)
+        self._monitor_btn = tk.Button(row2, text=_("btn.monitor"), command=self._open_monitor)
+        self._monitor_btn.pack(side=tk.LEFT)
          
         # Setup button with dynamic styling based on account status
-        self._setup_btn = tk.Button(top, text=_("btn.setup_account"), command=self._open_setup)
+        self._setup_btn = tk.Button(row2, text=_("btn.setup_account"), command=self._open_setup)
         self._setup_btn.pack(side=tk.LEFT, padx=8)
         
         # Account status indicator
-        self._status_label = tk.Label(top, text="●", font=("Arial", 14))
+        self._status_label = tk.Label(row2, text="●", font=("Arial", _px(self.root, 14)))
         self._status_label.pack(side=tk.LEFT, padx=4)
         self._update_account_status()
         
         # Right-side controls.
-        right = ttk.Frame(top)
+        right = ttk.Frame(row2)
         right.pack(side=tk.RIGHT)
         self._about_btn = tk.Button(right, text=_("btn.about"), command=self._open_about)
         self._about_btn.pack(side=tk.LEFT, padx=4)
@@ -3322,7 +3551,7 @@ class VolumeBoostGUI:
         w = tk.Toplevel(self.root)
         self._about_window = w
         w.title(_("about.title"))
-        w.geometry("520x180")
+        _set_scaled_geometry(w, 520, 180)
         w.resizable(False, False)
 
         outer = ttk.Frame(w, padding=12)

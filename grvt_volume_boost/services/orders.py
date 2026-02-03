@@ -60,7 +60,9 @@ def get_position_size(acc: AccountConfig, cookie: str, instrument: str) -> Decim
             return None
         for p in data["result"]:
             if p.get("instrument") == instrument:
-                return Decimal(p.get("size", "0"))
+                # API fields are typically strings, but defensive-cast to str so we don't
+                # accidentally ingest floats (binary rounding noise).
+                return Decimal(str(p.get("size", "0") or "0"))
         return Decimal(0)
     except Exception as e:
         debug("get_position_size failed", exc=e, extra={"instrument": instrument})

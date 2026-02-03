@@ -98,6 +98,17 @@ def _size_quantum(inst_info: dict) -> Decimal:
     return Decimal(1) / (Decimal(10) ** base_decimals)
 
 
+def _fmt_decimal(d: Decimal) -> str:
+    """Stable, human-readable Decimal formatting (no scientific notation; trim trailing zeros)."""
+    try:
+        s = format(d, "f")
+    except Exception:
+        s = str(d)
+    if "." in s:
+        s = s.rstrip("0").rstrip(".")
+    return s
+
+
 def _round_to_tick(price: Decimal, tick: Decimal, *, rounding) -> Decimal:
     if tick <= 0:
         return price
@@ -466,7 +477,28 @@ def place_order_pair(
     ws_start = time.time()
     ws_ms: float | None = None
     ws_method = "none"
-    if maker_oid_valid:
+    # Prefer the persistent WS client when available. It's already subscribed, so it's much less
+    # likely to miss the initial OPEN/PENDING event than a one-shot connect+subscribe after REST.
+    on_book = False
+    if ws_client is not None and ws_client.is_connected():
+        on_book = ws_client.wait_for_maker_confirm(
+            client_co=maker_co,
+            instrument=instrument,
+            size=str(size),
+            price=str(maker_price),
+            is_buying=a_is_buying,
+            timeout=5.0,
+        )
+        ws_ms = (time.time() - ws_start) * 1000.0
+        if on_book:
+            ws_method = "persistent"
+            _log(f"[DEBUG] maker ws_confirm method=persistent wait={ws_ms:.0f}ms")
+        else:
+            _log(f"[DEBUG] maker ws_confirm method=persistent wait={ws_ms:.0f}ms (not observed)")
+
+    # Fallbacks (one-shot WS): needed if persistent WS is unavailable/stale, or maker_co missing.
+    if not on_book and maker_oid_valid:
+        ws_start2 = time.time()
         on_book = wait_for_order_sync(
             cookie_a,
             acc_a.sub_account_id,
@@ -475,49 +507,15 @@ def place_order_pair(
             instrument=instrument,
             timeout=5.0,
         )
-        ws_ms = (time.time() - ws_start) * 1000.0
-        if not on_book:
-            _cancel_maker_order(acc_a, cookie_a, str(maker_order_id), instrument)
-            _ = _cancel_open_orders_for_instrument(acc_a, cookie_a, instrument)
+        ws_ms = (time.time() - ws_start2) * 1000.0
+        if on_book:
+            ws_method = "oid"
+            _log(f"[DEBUG] maker ws_confirm method=oid wait={ws_ms:.0f}ms")
+        else:
             _log(f"[DEBUG] maker ws_confirm method=oid wait={ws_ms:.0f}ms (not observed)")
-            return False, False, "Maker order not observed on book (WS); retrying to avoid external fill"
-        ws_method = "oid"
-        _log(f"[DEBUG] maker ws_confirm method=oid wait={ws_ms:.0f}ms")
-    elif ws_client is not None:
-        if not ws_client.is_connected():
-            _log("[DEBUG] maker ws_confirm: persistent client not connected; falling back to one-shot WS")
-            on_book = False
-        else:
-            on_book = ws_client.wait_for_maker_confirm(
-                client_co=maker_co,
-                instrument=instrument,
-                size=str(size),
-                price=str(maker_price),
-                is_buying=a_is_buying,
-                timeout=5.0,
-            )
-        ws_ms = (time.time() - ws_start) * 1000.0
-        if not on_book:
-            _ = _cancel_open_orders_for_instrument(acc_a, cookie_a, instrument)
-            _log(f"[DEBUG] maker ws_confirm method=persistent wait={ws_ms:.0f}ms (not observed)")
-            # Fall back to a one-shot WS subscribe to avoid false negatives when the persistent
-            # connection is connected-but-stale or misses early updates.
-            on_book2 = wait_for_order_by_client_co_sync(
-                cookie_a,
-                acc_a.sub_account_id,
-                str(maker_co or ""),
-                main_account_id=acc_a.main_account_id,
-                instrument=instrument,
-                timeout=5.0,
-            )
-            if not on_book2:
-                return False, False, "Maker order not observed on book (WS); retrying to avoid external fill"
-            ws_method = "fallback_ws"
-            _log(f"[DEBUG] maker ws_confirm method=fallback_ws wait={(time.time() - ws_start) * 1000.0:.0f}ms")
-        else:
-            ws_method = "persistent"
-            _log(f"[DEBUG] maker ws_confirm method=persistent wait={ws_ms:.0f}ms")
-    elif maker_co:
+
+    if not on_book and maker_co:
+        ws_start3 = time.time()
         on_book = wait_for_order_by_client_co_sync(
             cookie_a,
             acc_a.sub_account_id,
@@ -526,17 +524,19 @@ def place_order_pair(
             instrument=instrument,
             timeout=5.0,
         )
-        ws_ms = (time.time() - ws_start) * 1000.0
-        if not on_book:
-            _ = _cancel_open_orders_for_instrument(acc_a, cookie_a, instrument)
+        ws_ms = (time.time() - ws_start3) * 1000.0
+        if on_book:
+            ws_method = f"co={maker_co}"
+            _log(f"[DEBUG] maker ws_confirm method=co={maker_co} wait={ws_ms:.0f}ms")
+        else:
             _log(f"[DEBUG] maker ws_confirm method=co={maker_co} wait={ws_ms:.0f}ms (not observed)")
-            return False, False, "Maker order not observed on book (WS); retrying to avoid external fill"
-        ws_method = f"co={maker_co}"
-        _log(f"[DEBUG] maker ws_confirm method=co={maker_co} wait={ws_ms:.0f}ms")
-    else:
+
+    if not on_book:
         # If we can't confirm the maker, do not fire the IOC leg (it might hit external liquidity).
+        if maker_oid_valid:
+            _cancel_maker_order(acc_a, cookie_a, str(maker_order_id), instrument)
         _ = _cancel_open_orders_for_instrument(acc_a, cookie_a, instrument)
-        return False, False, "Maker order not confirmable (no oid/co); retrying"
+        return False, False, "Maker order not observed on book (WS); retrying to avoid external fill"
 
     # Record time gap from maker REST submit to firing the IOC leg.
     maker_to_ioc_ms = (time.time() - maker_req_start) * 1000.0
@@ -609,7 +609,11 @@ def place_order_pair(
     maker_delta_diff = abs(actual_a_delta - expected_a_delta)
     taker_delta_diff = abs(actual_b_delta - expected_b_delta)
     
-    _log(f"[DEBUG] Position deltas: maker={actual_a_delta} (expected {expected_a_delta}), taker={actual_b_delta} (expected {expected_b_delta})")
+    _log(
+        "[DEBUG] Position deltas: "
+        f"maker={_fmt_decimal(actual_a_delta)} (expected {_fmt_decimal(expected_a_delta)}), "
+        f"taker={_fmt_decimal(actual_b_delta)} (expected {_fmt_decimal(expected_b_delta)})"
+    )
     
     # If neither account position changed, the most likely causes are:
     # - Both orders were accepted but did not fill (IOC cancelled / maker cancelled)
@@ -685,7 +689,14 @@ def place_order_pair(
             pass
         
         # Signal warning to GUI
-        return True, False, f"EXTERNAL_FILL_WARNING: Taker matched external order - maker delta={actual_a_delta}, expected={expected_a_delta}"
+        return (
+            True,
+            False,
+            "EXTERNAL_FILL_WARNING: Position mismatch after IOC - "
+            f"maker delta={_fmt_decimal(actual_a_delta)} expected={_fmt_decimal(expected_a_delta)} diff={_fmt_decimal(maker_delta_diff)}, "
+            f"taker delta={_fmt_decimal(actual_b_delta)} expected={_fmt_decimal(expected_b_delta)} diff={_fmt_decimal(taker_delta_diff)}, "
+            f"tol={_fmt_decimal(delta_tol)}",
+        )
     
     # Full hedge - success!
     return True, False, ""
