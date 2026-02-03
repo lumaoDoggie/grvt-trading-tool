@@ -3682,6 +3682,23 @@ class VolumeBoostGUI:
         self.notebook = ttk.Notebook(self.root)
         self.notebook.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
 
+    def _restart_self(self) -> None:
+        """Restart via `-m grvt_volume_boost.gui_multi_market` so imports resolve from repo root.
+
+        When this file is launched via `python -m ...`, a naive exec of `sys.argv` will relaunch
+        the file path (e.g. `grvt_volume_boost/gui_multi_market.py`), which breaks top-level
+        imports like `import grvt_config`. Always restart as a module from the repo root.
+        """
+        try:
+            from pathlib import Path
+
+            repo_root = Path(__file__).resolve().parents[1]
+            os.chdir(str(repo_root))
+        except Exception:
+            pass
+
+        os.execv(sys.executable, [sys.executable, "-m", "grvt_volume_boost.gui_multi_market"])
+
     def _on_env_change(self, _e=None) -> None:
         selected = (self._env_var.get() or "").strip().lower()
         new_env = "testnet" if selected in ("testnet", "测试网") else "prod"
@@ -3704,10 +3721,7 @@ class VolumeBoostGUI:
 
         # Restart the current python process (ensures endpoints/session dir are reloaded cleanly).
         try:
-            argv = list(sys.argv)
-            if not argv:
-                argv = ["volume_boost_gui.py"]
-            os.execv(sys.executable, [sys.executable] + argv)
+            self._restart_self()
         except Exception as ex:
             messagebox.showerror(_("dlg.restart_failed.title"), _("dlg.restart_failed.body", err=f"{type(ex).__name__}: {ex}"))
             # Best-effort: revert selection
@@ -3727,10 +3741,7 @@ class VolumeBoostGUI:
         os.environ["GRVT_LANG"] = new_lang
 
         try:
-            argv = list(sys.argv)
-            if not argv:
-                argv = ["volume_boost_gui.py"]
-            os.execv(sys.executable, [sys.executable] + argv)
+            self._restart_self()
         except Exception as ex:
             messagebox.showerror(_("dlg.restart_failed.title"), _("dlg.restart_failed.body", err=f"{type(ex).__name__}: {ex}"))
 
