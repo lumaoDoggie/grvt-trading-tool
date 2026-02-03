@@ -2285,6 +2285,33 @@ class MarketRunPanel(ttk.Frame):
         event.wait()  # Block worker thread until user responds
         return result[0]
 
+    def _show_stop_required(self, title: str, body: str) -> None:
+        """Thread-safe blocking dialog for situations that require manual intervention."""
+        event = threading.Event()
+
+        def show_dialog():
+            dialog = tk.Toplevel(self)
+            dialog.title(title)
+            dialog.geometry(f"{_px(dialog, 520)}x{_px(dialog, 180)}")
+            dialog.transient(self)
+            dialog.grab_set()
+
+            ttk.Label(dialog, text=title, font=("", 11, "bold"), foreground="orange").pack(pady=(15, 5))
+            ttk.Label(dialog, text=body, wraplength=_px(dialog, 490)).pack(pady=5)
+
+            btn_frame = ttk.Frame(dialog)
+            btn_frame.pack(pady=15)
+
+            def close():
+                dialog.destroy()
+                event.set()
+
+            tk.Button(btn_frame, text="OK", command=close, width=12).pack(side=tk.LEFT, padx=10)
+            dialog.protocol("WM_DELETE_WINDOW", close)
+
+        self.after(0, show_dialog)
+        event.wait()
+
     def _filter_markets(self, _event) -> None:
         typed = (self.market_var.get() or "").upper()
         display_names = list(self._market_display_to_full.keys()) or [self._to_short_name(m) for m in self.app.markets]
@@ -3227,19 +3254,17 @@ class MarketRunPanel(ttk.Frame):
                 self._log("All positions closed")
                 break
 
-            # Close the hedgeable amount via self-match (maker+IOC). If one side is already flat,
-            # fall back to reduce-only market close for the residual to avoid leaving exposure.
+            # Close the hedgeable amount via self-match (maker+IOC). If one side is already flat
+            # (unhedged residual), STOP and prompt for manual intervention (never market-close).
             hedgeable = min(abs(pos_long_now), abs(pos_short_now))
             if hedgeable <= 0:
-                self._log_error(
-                    f"Residual unhedged position on {cfg.market}: {long_acc.name}={pos_long_now}, {short_acc.name}={pos_short_now}"
+                msg = (
+                    f"Close Existing stopped: residual unhedged position on {cfg.market}.\n\n"
+                    f"{long_acc.name}={pos_long_now}\n{short_acc.name}={pos_short_now}\n\n"
+                    "Manual intervention required (no market close was sent)."
                 )
-                ok1 = self._emergency_close(long_acc, cookie_long, cfg.market, inst_info)
-                ok2 = self._emergency_close(short_acc, cookie_short, cfg.market, inst_info)
-                if ok1 and ok2:
-                    self._log("  Emergency close successful")
-                else:
-                    self._log_error("  Emergency close failed - manual intervention required!")
+                self._log_error(msg.replace("\n", " "))
+                self._show_stop_required("Manual Intervention Required", msg)
                 break
 
             close_size = min(size_per_round, hedgeable)
@@ -3260,14 +3285,13 @@ class MarketRunPanel(ttk.Frame):
                 ws_client=ws_client,
             )
             if not success:
+                msg = (
+                    f"Close Existing stopped: self-match CLOSE failed on {cfg.market}.\n\n"
+                    f"Error: {err or 'unknown error'}\n\n"
+                    "Manual intervention required (no market close was sent)."
+                )
                 self._log_error(f"  CLOSE FAILED: {err or 'unknown error'}")
-                self._log("  Attempting emergency close...")
-                ok1 = self._emergency_close(long_acc, cookie_long, cfg.market, inst_info)
-                ok2 = self._emergency_close(short_acc, cookie_short, cfg.market, inst_info)
-                if ok1 and ok2:
-                    self._log("  Emergency close successful")
-                else:
-                    self._log_error("  Emergency close failed - manual intervention required!")
+                self._show_stop_required("Manual Intervention Required", msg)
                 break
 
             if err and "EXTERNAL_FILL_WARNING" in err:
