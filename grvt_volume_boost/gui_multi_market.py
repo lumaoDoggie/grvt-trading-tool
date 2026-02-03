@@ -3798,3 +3798,12 @@ class VolumeBoostGUI:
         self.root.lift()
         self.root.focus_force()
         self.root.mainloop()
+
+
+def main() -> None:
+    # Entry point for `python -m grvt_volume_boost.gui_multi_market`.
+    VolumeBoostGUI().run()
+
+
+if __name__ == "__main__":
+    main()
