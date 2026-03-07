@@ -143,6 +143,19 @@ def _fmt_decimal(d: Decimal) -> str:
     return s
 
 
+def _position_deltas_match(
+    actual_a_delta: Decimal,
+    expected_a_delta: Decimal,
+    actual_b_delta: Decimal,
+    expected_b_delta: Decimal,
+    tolerance: Decimal,
+) -> bool:
+    return (
+        abs(actual_a_delta - expected_a_delta) <= tolerance
+        and abs(actual_b_delta - expected_b_delta) <= tolerance
+    )
+
+
 def _round_to_tick(price: Decimal, tick: Decimal, *, rounding) -> Decimal:
     if tick <= 0:
         return price
@@ -607,27 +620,6 @@ def place_order_pair(
         _cancel_maker_order(acc_a, cookie_a, str(maker_order_id), instrument)
     _ = _cancel_open_orders_for_instrument(acc_a, cookie_a, instrument)
 
-    # ===== VERIFY HEDGE BY CHECKING POSITION CHANGES =====
-    # The taker might have filled someone else's order at the same price,
-    # leaving our maker unfilled. Check that maker's position actually changed.
-    # Positions can lag; poll briefly instead of a single fixed sleep.
-    start = time.time()
-    pos_a_after = None
-    pos_b_after = None
-    while time.time() - start < 2.0:
-        pos_a_after = get_position_size(acc_a, cookie_a, instrument)
-        pos_b_after = get_position_size(acc_b, cookie_b, instrument)
-        if pos_a_after is None or pos_b_after is None:
-            break
-        if Decimal(str(pos_a_after)) != pos_a_before or Decimal(str(pos_b_after)) != pos_b_before:
-            break
-        time.sleep(0.2)
-    if pos_a_after is None or pos_b_after is None:
-        return False, True, "Auth failed while checking positions after trade"
-    
-    pos_a_after = Decimal(str(pos_a_after))
-    pos_b_after = Decimal(str(pos_b_after))
-    
     # Calculate expected position changes
     # Opening: acc_a buys (pos increases), acc_b sells (pos decreases)
     # Closing: acc_a sells (pos decreases), acc_b buys (pos increases)
@@ -638,12 +630,52 @@ def place_order_pair(
         expected_a_delta = -size
         expected_b_delta = size
     
-    actual_a_delta = pos_a_after - pos_a_before
-    actual_b_delta = pos_b_after - pos_b_before
-    
     # Detect mismatches using smallest representable size increment to catch partial fills.
     min_size = _decimal_field(inst_info, "min_size", "0")
     delta_tol = max(_size_quantum(inst_info), Decimal("0.000000001"))
+
+    # ===== VERIFY HEDGE BY CHECKING POSITION CHANGES =====
+    # The taker might have filled someone else's order at the same price,
+    # leaving our maker unfilled. But position APIs can also update asynchronously,
+    # so don't treat a one-sided delta as external fill immediately.
+    first_change_deadline = time.time() + 2.0
+    settle_deadline = first_change_deadline + 3.0
+    pos_a_after = None
+    pos_b_after = None
+    actual_a_delta = Decimal("0")
+    actual_b_delta = Decimal("0")
+    saw_any_change = False
+
+    while time.time() < settle_deadline:
+        pos_a_now = get_position_size(acc_a, cookie_a, instrument)
+        pos_b_now = get_position_size(acc_b, cookie_b, instrument)
+        if pos_a_now is None or pos_b_now is None:
+            return False, True, "Auth failed while checking positions after trade"
+
+        pos_a_after = Decimal(str(pos_a_now))
+        pos_b_after = Decimal(str(pos_b_now))
+        actual_a_delta = pos_a_after - pos_a_before
+        actual_b_delta = pos_b_after - pos_b_before
+
+        if abs(actual_a_delta) > delta_tol or abs(actual_b_delta) > delta_tol:
+            saw_any_change = True
+
+        if _position_deltas_match(
+            actual_a_delta,
+            expected_a_delta,
+            actual_b_delta,
+            expected_b_delta,
+            delta_tol,
+        ):
+            break
+
+        if not saw_any_change and time.time() >= first_change_deadline:
+            break
+
+        time.sleep(0.2)
+
+    if pos_a_after is None or pos_b_after is None:
+        return False, True, "Auth failed while checking positions after trade"
     
     # Check if maker's position changed as expected
     maker_delta_diff = abs(actual_a_delta - expected_a_delta)
