@@ -156,6 +156,67 @@ def _position_deltas_match(
     )
 
 
+def _keep_running(should_continue: Callable[[], bool] | None) -> bool:
+    if should_continue is None:
+        return True
+    try:
+        return bool(should_continue())
+    except Exception:
+        return True
+
+
+def _interruptible_sleep(
+    seconds: float,
+    *,
+    should_continue: Callable[[], bool] | None = None,
+    interval: float = 0.1,
+) -> bool:
+    deadline = time.time() + max(0.0, float(seconds))
+    while time.time() < deadline:
+        if not _keep_running(should_continue):
+            return False
+        time.sleep(min(interval, max(0.0, deadline - time.time())))
+    return _keep_running(should_continue)
+
+
+def _detect_unhedged_maker_fill(
+    acc_a: AccountConfig,
+    acc_b: AccountConfig,
+    cookie_a: str,
+    cookie_b: str,
+    instrument: str,
+    *,
+    pos_a_before: Decimal,
+    pos_b_before: Decimal,
+    tolerance: Decimal,
+    should_continue: Callable[[], bool] | None = None,
+) -> str | None:
+    deadline = time.time() + 1.5
+    while time.time() < deadline:
+        if not _keep_running(should_continue):
+            return "Stopped by user"
+        pos_a_now = get_position_size(acc_a, cookie_a, instrument)
+        pos_b_now = get_position_size(acc_b, cookie_b, instrument)
+        if pos_a_now is None or pos_b_now is None:
+            return "Auth failed while checking positions after maker cancel"
+
+        pos_a_after = Decimal(str(pos_a_now))
+        pos_b_after = Decimal(str(pos_b_now))
+        actual_a_delta = pos_a_after - pos_a_before
+        actual_b_delta = pos_b_after - pos_b_before
+        if abs(actual_a_delta) > tolerance or abs(actual_b_delta) > tolerance:
+            return (
+                "Maker order changed position before hedge - "
+                f"maker delta={_fmt_decimal(actual_a_delta)}, "
+                f"taker delta={_fmt_decimal(actual_b_delta)}"
+            )
+
+        if not _interruptible_sleep(0.2, should_continue=should_continue):
+            return "Stopped by user"
+
+    return None
+
+
 def _round_to_tick(price: Decimal, tick: Decimal, *, rounding) -> Decimal:
     if tick <= 0:
         return price
@@ -304,6 +365,7 @@ def check_price_stable(
     wait_sec: float = 1.0,
     tolerance: Decimal = Decimal("0.0001"),
     price_buffer: "PriceBuffer | None" = None,
+    should_continue: Callable[[], bool] | None = None,
 ) -> tuple[bool, Decimal, Decimal]:
     """Return (stable, best_bid, best_ask).
     
@@ -326,7 +388,8 @@ def check_price_stable(
     bid1, ask1 = Decimal(ticker1["best_bid_price"]), Decimal(ticker1["best_ask_price"])
     mid1 = (bid1 + ask1) / 2
 
-    time.sleep(wait_sec)
+    if not _interruptible_sleep(wait_sec, should_continue=should_continue):
+        return False, bid1, ask1
 
     ticker2 = get_ticker(instrument)
     bid2, ask2 = Decimal(ticker2["best_bid_price"]), Decimal(ticker2["best_ask_price"])
@@ -433,6 +496,7 @@ def place_order_pair(
     price_buffer: "PriceBuffer | None" = None,
     on_log: Callable[[str], None] | None = None,
     ws_client: "OrderStreamClient | None" = None,
+    should_continue: Callable[[], bool] | None = None,
 ) -> tuple[bool, bool, str]:
     """Return (success, permanent_error, error_message)."""
     def _log(msg: str) -> None:
@@ -446,6 +510,10 @@ def place_order_pair(
 
     tick_size = _decimal_field(inst_info, "tick_size", "0")
     reduce_only = not is_opening
+    delta_tol = max(_size_quantum(inst_info), Decimal("0.000000001"))
+
+    if not _keep_running(should_continue):
+        return False, True, "Stopped by user"
 
     pos_a_before = get_position_size(acc_a, cookie_a, instrument)
     pos_b_before = get_position_size(acc_b, cookie_b, instrument)
@@ -466,8 +534,10 @@ def place_order_pair(
         best_bid, best_ask = Decimal(ticker["best_bid_price"]), Decimal(ticker["best_ask_price"])
     else:
         stable, best_bid, best_ask = check_price_stable(
-            instrument, wait_sec=1.0, price_buffer=price_buffer
+            instrument, wait_sec=1.0, price_buffer=price_buffer, should_continue=should_continue
         )
+        if not _keep_running(should_continue):
+            return False, True, "Stopped by user"
         if not stable:
             return False, False, "Price unstable"
 
@@ -589,6 +659,21 @@ def place_order_pair(
         if maker_oid_valid:
             _cancel_maker_order(acc_a, cookie_a, str(maker_order_id), instrument)
         _ = _cancel_open_orders_for_instrument(acc_a, cookie_a, instrument)
+        unhedged_msg = _detect_unhedged_maker_fill(
+            acc_a,
+            acc_b,
+            cookie_a,
+            cookie_b,
+            instrument,
+            pos_a_before=pos_a_before,
+            pos_b_before=pos_b_before,
+            tolerance=delta_tol,
+            should_continue=should_continue,
+        )
+        if unhedged_msg == "Stopped by user":
+            return False, True, unhedged_msg
+        if unhedged_msg:
+            return False, True, unhedged_msg
         return False, False, "Maker order not observed on book (WS); retrying to avoid external fill"
 
     # Record time gap from maker REST submit to firing the IOC leg.
@@ -632,7 +717,6 @@ def place_order_pair(
     
     # Detect mismatches using smallest representable size increment to catch partial fills.
     min_size = _decimal_field(inst_info, "min_size", "0")
-    delta_tol = max(_size_quantum(inst_info), Decimal("0.000000001"))
 
     # ===== VERIFY HEDGE BY CHECKING POSITION CHANGES =====
     # The taker might have filled someone else's order at the same price,
@@ -672,7 +756,8 @@ def place_order_pair(
         if not saw_any_change and time.time() >= first_change_deadline:
             break
 
-        time.sleep(0.2)
+        if not _interruptible_sleep(0.2, should_continue=should_continue):
+            return False, True, "Stopped by user"
 
     if pos_a_after is None or pos_b_after is None:
         return False, True, "Auth failed while checking positions after trade"
@@ -747,7 +832,8 @@ def place_order_pair(
                     _log(f"[DEBUG] Recovery: closing net short {imbalance} via {acc_b.name} market BUY reduce-only")
                     _ = place_market_order(acc_b, cookie_b, instrument, inst_info, abs(imbalance), is_buying=True, reduce_only=True)
             
-            time.sleep(0.3)
+            if not _interruptible_sleep(0.3, should_continue=should_continue):
+                return False, True, "Stopped by user"
 
         # Log post-recovery state (helps explain why the warning appeared even if we're now flat).
         try:
@@ -789,9 +875,12 @@ def place_order_pair_with_retry(
     on_log: Callable[[str], None] | None = None,
     price_buffer: "PriceBuffer | None" = None,
     ws_client: "OrderStreamClient | None" = None,
+    should_continue: Callable[[], bool] | None = None,
 ) -> tuple[bool, str]:
     last_error = ""
     for attempt in range(max_retries):
+        if not _keep_running(should_continue):
+            return False, "Stopped by user"
         success, permanent_error, error_msg = place_order_pair(
             acc_a,
             acc_b,
@@ -805,6 +894,7 @@ def place_order_pair_with_retry(
             price_buffer=price_buffer,
             on_log=on_log,
             ws_client=ws_client,
+            should_continue=should_continue,
         )
         if success:
             # Pass through warning message (e.g., EXTERNAL_FILL_WARNING) if present
@@ -823,7 +913,8 @@ def place_order_pair_with_retry(
                     pass
             else:
                 print(msg)
-            time.sleep(wait)
+            if not _interruptible_sleep(wait, should_continue=should_continue):
+                return False, "Stopped by user"
 
     return False, f"Failed after {max_retries} retries: {last_error}"
 

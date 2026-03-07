@@ -2244,7 +2244,32 @@ class MarketRunPanel(ttk.Frame):
         if not self._running.is_set():
             return
         self._running.clear()
-        self._log("Stop requested; stopping after current action...")
+        try:
+            if self._order_ws is not None:
+                self._order_ws.stop()
+        except Exception:
+            pass
+        try:
+            if self._ticker_monitor is not None:
+                self._ticker_monitor.stop()
+        except Exception:
+            pass
+        self._log("Stop requested; stopping immediately...")
+
+    def _is_stop_requested_error(self, err: str | None) -> bool:
+        return (err or "").strip().lower() == "stopped by user"
+
+    def _sleep_or_stop(self, seconds: float) -> bool:
+        deadline = time.time() + max(0.0, float(seconds))
+        while time.time() < deadline:
+            if not self._running.is_set():
+                return False
+            time.sleep(min(0.1, max(0.0, deadline - time.time())))
+        return self._running.is_set()
+
+    def _place_order_pair_with_retry(self, *args, **kwargs) -> tuple[bool, str]:
+        kwargs["should_continue"] = self._running.is_set
+        return place_order_pair_with_retry(*args, **kwargs)
 
     def _show_external_fill_warning(self, warning_msg: str) -> bool:
         """Thread-safe dialog to ask user if they want to continue after external fills detected.
@@ -2853,7 +2878,7 @@ class MarketRunPanel(ttk.Frame):
                 mid = (Decimal(str(ticker["best_bid_price"])) + Decimal(str(ticker["best_ask_price"]))) / 2
 
             self._log(f"  OPEN {size} (long={long_acc.name}, short={short_acc.name})")
-            success, err = place_order_pair_with_retry(
+            success, err = self._place_order_pair_with_retry(
                 long_acc,
                 short_acc,
                 cookie_long,
@@ -2868,6 +2893,9 @@ class MarketRunPanel(ttk.Frame):
                 ws_client=ws_client,
             )
             if not success:
+                if self._is_stop_requested_error(err):
+                    self._log("Stopped")
+                    break
                 self._log_error(f"  FAILED: {err}")
                 break
             # OPEN contributes 2 legs of volume (one per account). Count it even if we later stop on warning.
@@ -2881,7 +2909,9 @@ class MarketRunPanel(ttk.Frame):
                     break
                 continued_after_warning = True
 
-            time.sleep(cfg.delay_sec)
+            if not self._sleep_or_stop(cfg.delay_sec):
+                self._log("Stopped")
+                break
 
             # If OPEN had external fills and the strategy auto-recovered to flat (or a smaller hedge),
             # don't blindly attempt to CLOSE the original `size` (reduce-only will fail).
@@ -2906,7 +2936,7 @@ class MarketRunPanel(ttk.Frame):
 
             if close_size is not None:
                 self._log(f"  CLOSE {close_size}")
-                success, err = place_order_pair_with_retry(
+                success, err = self._place_order_pair_with_retry(
                     long_acc,
                     short_acc,
                     cookie_long,
@@ -2921,6 +2951,9 @@ class MarketRunPanel(ttk.Frame):
                     ws_client=ws_client,
                 )
                 if not success:
+                    if self._is_stop_requested_error(err):
+                        self._log("Stopped")
+                        break
                     self._log_error(f"  CLOSE FAILED: {err or 'unknown error'}")
                     self._log("  Attempting emergency close...")
                     ok1 = self._emergency_close(long_acc, cookie_long, cfg.market, inst_info)
@@ -2972,7 +3005,9 @@ class MarketRunPanel(ttk.Frame):
                 self._log(f"  >> Accumulated: ${total_volume:,.2f}")
 
             if i < cfg.rounds - 1 and self._running.is_set():
-                time.sleep(random.uniform(1, 2))
+                if not self._sleep_or_stop(random.uniform(1, 2)):
+                    self._log("Stopped")
+                    break
 
         self._log(f"Total USD volume: ${total_volume:,.2f}")
 
@@ -3023,7 +3058,7 @@ class MarketRunPanel(ttk.Frame):
                 break
 
             self._log(f"  OPEN {size} {cfg.market}...")
-            success, err = place_order_pair_with_retry(
+            success, err = self._place_order_pair_with_retry(
                 long_acc,
                 short_acc,
                 cookie_long,
@@ -3038,6 +3073,9 @@ class MarketRunPanel(ttk.Frame):
                 ws_client=ws_client,
             )
             if not success:
+                if self._is_stop_requested_error(err):
+                    self._log("Stopped")
+                    break
                 self._log_error(f"  FAILED: {err}")
                 break
 
@@ -3049,7 +3087,9 @@ class MarketRunPanel(ttk.Frame):
 
             opened_rounds += 1
             self._log("  OK")
-            time.sleep(1)
+            if not self._sleep_or_stop(1):
+                self._log("Stopped")
+                break
 
         if opened_rounds == 0:
             self._log("No positions opened")
@@ -3065,7 +3105,9 @@ class MarketRunPanel(ttk.Frame):
                 break
             if remaining % 60 == 0:
                 self._log(f"  Closing in {remaining // 60} min...")
-            time.sleep(1)
+            if not self._sleep_or_stop(1):
+                self._log("Stopped")
+                break
 
         self._log("\n=== PHASE 3: CLOSING POSITIONS ===")
         # Refresh cookies before close phase (may have expired during hold)
@@ -3111,7 +3153,7 @@ class MarketRunPanel(ttk.Frame):
             close_size = min(size, abs(pos_long), abs(pos_short))
             closed_iters += 1
             self._log(f"[Close {closed_iters}] CLOSE {close_size}...")
-            success, err = place_order_pair_with_retry(
+            success, err = self._place_order_pair_with_retry(
                 long_acc,
                 short_acc,
                 cookie_long,
@@ -3126,6 +3168,9 @@ class MarketRunPanel(ttk.Frame):
                 ws_client=ws_client,
             )
             if not success:
+                if self._is_stop_requested_error(err):
+                    self._log("Stopped")
+                    break
                 self._log_error(f"  CLOSE FAILED: {err}")
                 self._log("  Attempting emergency close...")
                 ok1 = self._emergency_close(long_acc, cookie_long, cfg.market, inst_info)
@@ -3149,7 +3194,9 @@ class MarketRunPanel(ttk.Frame):
                     break
 
             self._log("  OK")
-            time.sleep(1)
+            if not self._sleep_or_stop(1):
+                self._log("Stopped")
+                break
 
             # Guard against pathological loops (should never happen in normal conditions).
             if closed_iters > opened_rounds + 20:
@@ -3209,7 +3256,7 @@ class MarketRunPanel(ttk.Frame):
                 break
 
             self._log(f"  OPEN {size} {cfg.market}...")
-            success, err = place_order_pair_with_retry(
+            success, err = self._place_order_pair_with_retry(
                 long_acc,
                 short_acc,
                 cookie_long,
@@ -3224,6 +3271,9 @@ class MarketRunPanel(ttk.Frame):
                 ws_client=ws_client,
             )
             if not success:
+                if self._is_stop_requested_error(err):
+                    self._log("Stopped")
+                    break
                 self._log_error(f"  FAILED: {err}")
                 break
 
@@ -3235,7 +3285,9 @@ class MarketRunPanel(ttk.Frame):
 
             opened_rounds += 1
             self._log("  OK")
-            time.sleep(1)
+            if not self._sleep_or_stop(1):
+                self._log("Stopped")
+                break
 
         self._log(f"\nBuild complete. Opened {opened_rounds} rounds.")
         self._log("Use 'Close Existing' mode to close positions when ready.")
@@ -3317,7 +3369,7 @@ class MarketRunPanel(ttk.Frame):
             close_size = min(size_per_round, hedgeable)
             self._log(f"[Round {i+1}/{total_rounds}] CLOSE {close_size} (self-match)")
 
-            success, err = place_order_pair_with_retry(
+            success, err = self._place_order_pair_with_retry(
                 long_acc,
                 short_acc,
                 cookie_long,
@@ -3332,6 +3384,9 @@ class MarketRunPanel(ttk.Frame):
                 ws_client=ws_client,
             )
             if not success:
+                if self._is_stop_requested_error(err):
+                    self._log("Stopped")
+                    break
                 msg = (
                     f"Close Existing stopped: self-match CLOSE failed on {cfg.market}.\n\n"
                     f"Error: {err or 'unknown error'}\n\n"
@@ -3349,7 +3404,9 @@ class MarketRunPanel(ttk.Frame):
 
             closed += close_size
             self._log(f"  OK (closed ~{closed})")
-            time.sleep(1)
+            if not self._sleep_or_stop(1):
+                self._log("Stopped")
+                break
 
         # Final verification (best-effort): positions should be flat after closing.
         p1_final = get_position_size(pair.primary, cookie_primary, cfg.market)

@@ -208,7 +208,14 @@ class OrderStreamClient:
             ev = threading.Event()
             self._waiters.setdefault(want, []).append(ev)
 
-        ok = ev.wait(timeout=timeout)
+        deadline = time.time() + timeout
+        ok = False
+        while time.time() < deadline:
+            if self._stop_event.is_set():
+                break
+            if ev.wait(timeout=min(0.1, max(0.0, deadline - time.time()))):
+                ok = True
+                break
         # Cleanup waiter list.
         with self._lock:
             lst = self._waiters.get(want) or []
@@ -247,6 +254,8 @@ class OrderStreamClient:
 
         with self._cv:
             while time.time() < deadline:
+                if self._stop_event.is_set():
+                    return False
                 # Scan recent events for a match.
                 for ev in reversed(self._events):
                     if str(ev.get("status", "")).upper() not in ("OPEN", "PENDING"):
@@ -267,7 +276,7 @@ class OrderStreamClient:
                 remaining = max(0.0, deadline - time.time())
                 if remaining <= 0:
                     break
-                self._cv.wait(timeout=min(0.5, remaining))
+                self._cv.wait(timeout=min(0.1, remaining))
 
         return False
 
